@@ -1,0 +1,15 @@
+{
+  "name": "wasmesc",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Tiny experiments around JavaScript-to-core-WebAssembly compilation and import semantics.",
+  "scripts": {
+    "test": "node --test",
+    "demo:imports": "node poc/inherited-imports.js",
+    "compile": "node src/cli.js"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
