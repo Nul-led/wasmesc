@@ -1,6 +1,8 @@
 const encoder = new TextEncoder();
 
 export const ValType = Object.freeze({
+  i32: 0x7f,
+  i64: 0x7e,
   f64: 0x7c,
   externref: 0x6f,
 });
@@ -16,6 +18,38 @@ export function u32(value) {
     if (value !== 0) byte |= 0x80;
     out.push(byte);
   } while (value !== 0);
+  return out;
+}
+
+export function s32(value) {
+  if (!Number.isInteger(value) || value < -0x80000000 || value > 0x7fffffff) {
+    throw new RangeError(`s32 out of range: ${value}`);
+  }
+  const out = [];
+  let more = true;
+  while (more) {
+    let byte = value & 0x7f;
+    value >>= 7;
+    const signBit = byte & 0x40;
+    more = !((value === 0 && signBit === 0) || (value === -1 && signBit !== 0));
+    if (more) byte |= 0x80;
+    out.push(byte);
+  }
+  return out;
+}
+
+export function s64(value) {
+  value = BigInt.asIntN(64, BigInt(value));
+  const out = [];
+  let more = true;
+  while (more) {
+    let byte = Number(value & 0x7fn);
+    value >>= 7n;
+    const signBit = byte & 0x40;
+    more = !((value === 0n && signBit === 0) || (value === -1n && signBit !== 0));
+    if (more) byte |= 0x80;
+    out.push(byte);
+  }
   return out;
 }
 
