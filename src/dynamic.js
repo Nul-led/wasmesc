@@ -114,8 +114,8 @@ class Parser {
     return statements;
   }
 
-  parseProgram() {
-    this.maybe('export');
+  parseFunction() {
+    const exported = Boolean(this.maybe('export'));
     this.take('function');
     const name = this.take('id').value;
     this.take('(');
@@ -127,11 +127,29 @@ class Parser {
     }
     this.take(')');
     const statements = this.parseBlock();
+
+    if (new Set(params).size !== params.length) {
+      throw new SyntaxError('Duplicate parameter in function ' + name);
+    }
+
+    return { type: 'function', name, params, statements, exported };
+  }
+
+  parseProgram() {
+    const functions = [];
+    while (!this.peek('eof')) functions.push(this.parseFunction());
     this.take('eof');
 
-    if (new Set(params).size !== params.length) throw new SyntaxError('Duplicate parameter');
+    if (functions.length === 0) throw new SyntaxError('Expected at least one function');
 
-    return { type: 'function', name, params, statements };
+    const names = new Set();
+    for (const fn of functions) {
+      if (names.has(fn.name)) throw new SyntaxError('Duplicate function: ' + fn.name);
+      names.add(fn.name);
+    }
+
+    if (!functions.some((fn) => fn.exported)) functions[0].exported = true;
+    return { type: 'program', functions };
   }
 
   parseStatement() {
@@ -233,9 +251,28 @@ class Parser {
 
   parsePostfix() {
     let value = this.parsePrimary();
-    while (this.maybe('.')) {
-      value = { type: 'member', object: value, property: this.take('id').value };
+
+    while (true) {
+      if (this.maybe('.')) {
+        value = { type: 'member', object: value, property: this.take('id').value };
+        continue;
+      }
+
+      if (this.maybe('(')) {
+        const args = [];
+        if (!this.peek(')')) {
+          do {
+            args.push(this.parseExpression());
+          } while (this.maybe(','));
+        }
+        this.take(')');
+        value = { type: 'call', callee: value, args };
+        continue;
+      }
+
+      break;
     }
+
     return value;
   }
 
@@ -327,8 +364,9 @@ const RuntimeFn = Object.freeze({
   numberFromF64: 4,
   truthy: 5,
   strictEqual: 6,
-  main: 7,
 });
+
+const RuntimeFunctionCount = 7;
 
 const emptyBlock = 0x40;
 
@@ -582,7 +620,7 @@ function strictEqualBody() {
   });
 }
 
-function collectPropertyNames(ast) {
+function collectPropertyNames(program) {
   const names = new Set();
 
   function visitExpression(node) {
@@ -597,6 +635,11 @@ function collectPropertyNames(ast) {
     if (node.type === 'member') {
       names.add(node.property);
       visitExpression(node.object);
+      return;
+    }
+    if (node.type === 'call') {
+      visitExpression(node.callee);
+      node.args.forEach(visitExpression);
       return;
     }
     if (node.type === 'binary') {
@@ -624,7 +667,7 @@ function collectPropertyNames(ast) {
     }
   }
 
-  ast.statements.forEach(visitStatement);
+  for (const fn of program.functions) fn.statements.forEach(visitStatement);
   return new Map([...names].map((name, index) => [name, index + 1]));
 }
 
@@ -634,7 +677,7 @@ function bindingIndex(scope, name) {
   return binding.index;
 }
 
-function compileExpression(node, scope, propertyIds) {
+function compileExpression(node, scope, propertyIds, functions) {
   switch (node.type) {
     case 'number':
       return i64Const(numberToBits(node.value));
@@ -648,7 +691,7 @@ function compileExpression(node, scope, propertyIds) {
     case 'id':
       return localGet(bindingIndex(scope, node.name));
     case 'unary': {
-      const value = compileExpression(node.value, scope, propertyIds);
+      const value = compileExpression(node.value, scope, propertyIds, functions);
       if (node.op === '+') return value;
       if (node.op === '!') {
         return booleanFromI32([
@@ -674,9 +717,9 @@ function compileExpression(node, scope, propertyIds) {
 
       if (arithmeticOpcode !== undefined) {
         return [
-          ...compileExpression(node.left, scope, propertyIds),
+          ...compileExpression(node.left, scope, propertyIds, functions),
           Op.f64ReinterpretI64,
-          ...compileExpression(node.right, scope, propertyIds),
+          ...compileExpression(node.right, scope, propertyIds, functions),
           Op.f64ReinterpretI64,
           arithmeticOpcode,
           ...call(RuntimeFn.numberFromF64),
@@ -692,9 +735,9 @@ function compileExpression(node, scope, propertyIds) {
 
       if (relationalOpcode !== undefined) {
         return booleanFromI32([
-          ...compileExpression(node.left, scope, propertyIds),
+          ...compileExpression(node.left, scope, propertyIds, functions),
           Op.f64ReinterpretI64,
-          ...compileExpression(node.right, scope, propertyIds),
+          ...compileExpression(node.right, scope, propertyIds, functions),
           Op.f64ReinterpretI64,
           relationalOpcode,
         ]);
@@ -702,8 +745,8 @@ function compileExpression(node, scope, propertyIds) {
 
       if (node.op === '===' || node.op === '!==') {
         const condition = [
-          ...compileExpression(node.left, scope, propertyIds),
-          ...compileExpression(node.right, scope, propertyIds),
+          ...compileExpression(node.left, scope, propertyIds, functions),
+          ...compileExpression(node.right, scope, propertyIds, functions),
           ...call(RuntimeFn.strictEqual),
         ];
         if (node.op === '!==') condition.push(Op.i32Eqz);
@@ -720,7 +763,7 @@ function compileExpression(node, scope, propertyIds) {
       for (const property of node.properties) {
         instructions.push(
           ...i32Const(propertyIds.get(property.key)),
-          ...compileExpression(property.value, scope, propertyIds),
+          ...compileExpression(property.value, scope, propertyIds, functions),
           ...call(RuntimeFn.objectSet),
         );
       }
@@ -728,10 +771,30 @@ function compileExpression(node, scope, propertyIds) {
     }
     case 'member':
       return [
-        ...compileExpression(node.object, scope, propertyIds),
+        ...compileExpression(node.object, scope, propertyIds, functions),
         ...i32Const(propertyIds.get(node.property)),
         ...call(RuntimeFn.objectGet),
       ];
+    case 'call': {
+      if (node.callee.type !== 'id') {
+        throw new SyntaxError('Only direct function calls are supported');
+      }
+      if (scope.has(node.callee.name)) {
+        throw new SyntaxError('Calling local values is not supported: ' + node.callee.name);
+      }
+      const fn = functions.get(node.callee.name);
+      if (!fn) throw new ReferenceError('Unknown function: ' + node.callee.name);
+      if (node.args.length !== fn.paramCount) {
+        throw new TypeError(
+          'Function ' + node.callee.name + ' expects ' + fn.paramCount +
+          ' arguments, got ' + node.args.length,
+        );
+      }
+      return [
+        ...node.args.flatMap((arg) => compileExpression(arg, scope, propertyIds, functions)),
+        ...call(fn.index),
+      ];
+    }
     default:
       throw new Error('Unknown AST node: ' + node.type);
   }
@@ -743,14 +806,14 @@ function branchDepth(labels, kind) {
   return depth;
 }
 
-function compileStatements(statements, scope, locals, propertyIds, labels = []) {
+function compileStatements(statements, scope, locals, propertyIds, functions, labels = []) {
   const instructions = [];
 
   for (const statement of statements) {
     if (statement.type === 'var') {
       if (scope.has(statement.name)) throw new SyntaxError('Duplicate local: ' + statement.name);
       const localIndex = scope.paramCount + locals.length;
-      instructions.push(...compileExpression(statement.init, scope, propertyIds));
+      instructions.push(...compileExpression(statement.init, scope, propertyIds, functions));
       instructions.push(...localSet(localIndex));
       locals.push(ValType.i64);
       scope.set(statement.name, { index: localIndex, kind: statement.kind });
@@ -764,15 +827,15 @@ function compileStatements(statements, scope, locals, propertyIds, labels = []) 
         if (binding.kind === 'const') {
           throw new TypeError('Assignment to constant variable: ' + statement.target.name);
         }
-        instructions.push(...compileExpression(statement.value, scope, propertyIds));
+        instructions.push(...compileExpression(statement.value, scope, propertyIds, functions));
         instructions.push(...localSet(binding.index));
         continue;
       }
 
       instructions.push(
-        ...compileExpression(statement.target.object, scope, propertyIds),
+        ...compileExpression(statement.target.object, scope, propertyIds, functions),
         ...i32Const(propertyIds.get(statement.target.property)),
-        ...compileExpression(statement.value, scope, propertyIds),
+        ...compileExpression(statement.value, scope, propertyIds, functions),
         ...call(RuntimeFn.objectSet),
         Op.drop,
       );
@@ -780,14 +843,14 @@ function compileStatements(statements, scope, locals, propertyIds, labels = []) 
     }
 
     if (statement.type === 'return') {
-      instructions.push(...compileExpression(statement.value, scope, propertyIds));
+      instructions.push(...compileExpression(statement.value, scope, propertyIds, functions));
       instructions.push(Op.return);
       continue;
     }
 
     if (statement.type === 'if') {
       instructions.push(
-        ...compileExpression(statement.test, scope, propertyIds),
+        ...compileExpression(statement.test, scope, propertyIds, functions),
         ...call(RuntimeFn.truthy),
         Op.if, emptyBlock,
         ...compileStatements(
@@ -795,6 +858,7 @@ function compileStatements(statements, scope, locals, propertyIds, labels = []) 
           childScope(scope),
           locals,
           propertyIds,
+          functions,
           ['if', ...labels],
         ),
       );
@@ -806,6 +870,7 @@ function compileStatements(statements, scope, locals, propertyIds, labels = []) 
             childScope(scope),
             locals,
             propertyIds,
+            functions,
             ['if', ...labels],
           ),
         );
@@ -818,7 +883,7 @@ function compileStatements(statements, scope, locals, propertyIds, labels = []) 
       instructions.push(
         Op.block, emptyBlock,
           Op.loop, emptyBlock,
-            ...compileExpression(statement.test, scope, propertyIds),
+            ...compileExpression(statement.test, scope, propertyIds, functions),
             ...call(RuntimeFn.truthy),
             Op.i32Eqz,
             Op.brIf, ...u32(1),
@@ -827,6 +892,7 @@ function compileStatements(statements, scope, locals, propertyIds, labels = []) 
               childScope(scope),
               locals,
               propertyIds,
+              functions,
               ['continue', 'break', ...labels],
             ),
             Op.br, ...u32(0),
@@ -862,18 +928,38 @@ export function parseDynamic(source) {
   return new Parser(source).parseProgram();
 }
 
-export function compileDynamic(source) {
-  const ast = parseDynamic(source);
-  const propertyIds = collectPropertyNames(ast);
+function compileSourceFunction(fn, propertyIds, functions) {
   const scope = new Map();
-  scope.paramCount = ast.params.length;
-  ast.params.forEach((name, index) => scope.set(name, { index, kind: 'param' }));
+  scope.paramCount = fn.params.length;
+  fn.params.forEach((name, index) => scope.set(name, { index, kind: 'param' }));
 
   const locals = [];
-  const instructions = compileStatements(ast.statements, scope, locals, propertyIds);
+  const instructions = compileStatements(
+    fn.statements,
+    scope,
+    locals,
+    propertyIds,
+    functions,
+  );
   instructions.push(...i64Const(JSValue.UNDEFINED));
+  return encodeFunctionBody({ locals, instructions });
+}
 
-  const types = [
+export function compileDynamic(source) {
+  const program = parseDynamic(source);
+  const propertyIds = collectPropertyNames(program);
+
+  const functions = new Map();
+  program.functions.forEach((fn, index) => {
+    functions.set(fn.name, {
+      index: RuntimeFunctionCount + index,
+      typeIndex: RuntimeFunctionCount + index,
+      paramCount: fn.params.length,
+      exported: fn.exported,
+    });
+  });
+
+  const runtimeTypes = [
     functionType([ValType.i32], [ValType.i32]),
     functionType([ValType.i32], [ValType.i64]),
     functionType([ValType.i64, ValType.i32, ValType.i64], [ValType.i64]),
@@ -881,23 +967,33 @@ export function compileDynamic(source) {
     functionType([ValType.f64], [ValType.i64]),
     functionType([ValType.i64], [ValType.i32]),
     functionType([ValType.i64, ValType.i64], [ValType.i32]),
-    functionType(ast.params.map(() => ValType.i64), [ValType.i64]),
   ];
 
-  const typeSection = section(1, vec(types));
+  const sourceTypes = program.functions.map((fn) => (
+    functionType(fn.params.map(() => ValType.i64), [ValType.i64])
+  ));
+
+  const typeSection = section(1, vec([...runtimeTypes, ...sourceTypes]));
   const functionSection = section(3, vec([
-    [...u32(0)], [...u32(1)], [...u32(2)], [...u32(3)],
-    [...u32(4)], [...u32(5)], [...u32(6)], [...u32(7)],
+    ...runtimeTypes.map((_, index) => [...u32(index)]),
+    ...program.functions.map((_, index) => [...u32(RuntimeFunctionCount + index)]),
   ]));
   const memorySection = section(5, vec([[0x00, ...u32(1)]]));
   const globalSection = section(6, vec([[
     ValType.i32, 0x01,
     Op.i32Const, ...s32(1024), Op.end,
   ]]));
-  const exportSection = section(7, vec([
-    [...wasmString(ast.name), 0x00, ...u32(RuntimeFn.main)],
-    [...wasmString('memory'), 0x02, ...u32(0)],
-  ]));
+
+  const exports = program.functions
+    .filter((fn) => fn.exported)
+    .map((fn) => [
+      ...wasmString(fn.name),
+      0x00,
+      ...u32(functions.get(fn.name).index),
+    ]);
+  exports.push([...wasmString('memory'), 0x02, ...u32(0)]);
+  const exportSection = section(7, vec(exports));
+
   const codeSection = section(10, vec([
     allocBody(),
     objectNewBody(),
@@ -906,7 +1002,7 @@ export function compileDynamic(source) {
     numberFromF64Body(),
     truthyBody(),
     strictEqualBody(),
-    encodeFunctionBody({ locals, instructions }),
+    ...program.functions.map((fn) => compileSourceFunction(fn, propertyIds, functions)),
   ]));
 
   return moduleBytes([
@@ -918,3 +1014,4 @@ export function compileDynamic(source) {
     codeSection,
   ]);
 }
+
