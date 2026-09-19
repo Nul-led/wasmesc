@@ -50,6 +50,7 @@ false
 true
 object pointer
 string pointer
+array pointer
 ```
 
 Arithmetic NaNs are canonicalized before returning to the tagged representation, keeping them out of the reserved tag space.
@@ -81,7 +82,22 @@ string:
 +4   code units              : u16[]
 ```
 
-The heap begins after the aligned static-string region, so literal data and runtime objects share the same ordinary linear memory without overlapping. Equal source literals share one pointer, which gives the current strict-equality implementation JavaScript string-value semantics for compiled literals.
+The heap begins after the aligned static-string region, so literal data and runtime values share the same ordinary linear memory without overlapping. Equal source literals share one pointer, which gives the current strict-equality implementation JavaScript string-value semantics for compiled literals.
+
+Arrays use an alias-safe linked-entry representation:
+
+```text
+array:
++0   head entry pointer : i32
++4   length             : i32
+
+element entry:
++0   next entry pointer : i32
++4   encoded index      : i32
++8   JSValue            : i64
+```
+
+Indexed writes prepend entries and update `length` when an index extends the array. Reads walk newest-to-oldest, so repeated writes are last-write-wins and holes read as `undefined`. The current array subset supports non-negative integer numeric indexes; broader JavaScript property-key coercion is not implemented yet.
 
 Example:
 
@@ -112,7 +128,7 @@ console.log(WebAssembly.Module.imports(module)); // []
 
 Dynamic function parameters/results use the tagged `i64` ABI. JavaScript therefore sees them as `bigint`; `src/jsvalue.js` contains `encodeJSValue()` and `decodeJSValue()` helpers for tests and embedding. Passing the exported memory to `decodeJSValue(bits, memory)` decodes tagged strings back to JavaScript strings.
 
-The dynamic subset currently supports multiple top-level functions, direct calls (including forward calls and recursion), explicit exports, expression statements, numeric arithmetic and comparisons, strict equality/inequality (`===`, `!==`), unary `!`, JavaScript-style truthiness for the represented value kinds, `if`/`else`, `else if`, mutable `let`/parameter bindings, `while` loops with `break`/`continue`, primitive literals (`true`, `false`, `null`, `undefined`), interned string literals, object literals, nested objects, static member reads and writes, locals, parameters, and return values. Property assignment supports new keys, overwrites, aliases, and nested member chains. Function fallthrough produces `undefined`. It is intentionally not pretending to implement all JavaScript coercion rules yet.
+The dynamic subset currently supports multiple top-level functions, direct calls (including forward calls and recursion), explicit exports, expression statements, numeric arithmetic and comparisons, strict equality/inequality (`===`, `!==`), unary `!`, JavaScript-style truthiness for the represented value kinds, `if`/`else`, `else if`, mutable `let`/parameter bindings, `while` loops with `break`/`continue`, primitive literals (`true`, `false`, `null`, `undefined`), interned string literals, growable array literals with computed reads/writes and `.length`, object literals, nested objects, static member reads and writes, locals, parameters, and return values. Property assignment supports new keys, overwrites, aliases, and nested member chains. Function fallthrough produces `undefined`. It is intentionally not pretending to implement all JavaScript coercion rules yet.
 
 ## Pipeline
 
@@ -127,7 +143,7 @@ The binary encoder is dependency-free and writes sections/opcodes directly.
 A useful next sequence is:
 
 - string concatenation and host-side string argument encoding;
-- arrays;
+- array `length` assignment, richer index coercion, and array methods;
 - proper `ToNumber` coercions and broader JavaScript comparison semantics;
 - shapes/hidden classes and inline property caches once semantics are stable.
 
@@ -143,7 +159,7 @@ That includes edge cases produced naturally by floating-point arithmetic such as
 npm test
 ```
 
-Tests verify that generated modules have zero imports, tagged primitive values round-trip, interned UTF-16 strings decode from linear memory with JavaScript truthiness/equality behavior, nested objects live in linear memory, property reads/writes preserve aliasing and last-write-wins behavior, missing properties produce `undefined`, arithmetic matches Node on the differential corpus, structured control flow preserves `if`, loops, `break`, and `continue` semantics across nested Wasm labels, direct source-function calls work across forward references and recursion, and unused expression values are explicitly dropped without disturbing stack balance.
+Tests verify that generated modules have zero imports, tagged primitive values round-trip, interned UTF-16 strings decode from linear memory with JavaScript truthiness/equality behavior, growable arrays preserve length/index/alias semantics, nested objects live in linear memory, property reads/writes preserve aliasing and last-write-wins behavior, missing properties produce `undefined`, arithmetic matches Node on the differential corpus, structured control flow preserves `if`, loops, `break`, and `continue` semantics across nested Wasm labels, direct source-function calls work across forward references and recursion, and unused expression values are explicitly dropped without disturbing stack balance.
 
 ## Reference
 

@@ -6,6 +6,7 @@ export const JSValue = Object.freeze({
   TRUE: 0x7ffc000000000000n,
   OBJECT: 0x7ffd000000000000n,
   STRING: 0x7ffe000000000000n,
+  ARRAY: 0x7fff000000000000n,
   TAG_MASK: 0xffff000000000000n,
   PAYLOAD_MASK: 0x0000ffffffffffffn,
 });
@@ -67,6 +68,16 @@ export function decodeJSValue(bits, memory = null) {
     }
     return value;
   }
+  if (tag === JSValue.ARRAY) {
+    const pointer = payloadPointer(bits);
+    if (memory === null) return Object.freeze({ type: 'array', pointer });
+    const view = new DataView(memoryBuffer(memory));
+    return Object.freeze({
+      type: 'array',
+      pointer,
+      length: view.getUint32(pointer + 4, true),
+    });
+  }
   return bitsToNumber(bits);
 }
 
@@ -82,6 +93,14 @@ export function stringPointer(bits) {
   bits = BigInt.asUintN(64, bits);
   if ((bits & JSValue.TAG_MASK) !== JSValue.STRING) {
     throw new TypeError('JSValue is not a string');
+  }
+  return payloadPointer(bits);
+}
+
+export function arrayPointer(bits) {
+  bits = BigInt.asUintN(64, bits);
+  if ((bits & JSValue.TAG_MASK) !== JSValue.ARRAY) {
+    throw new TypeError('JSValue is not an array');
   }
   return payloadPointer(bits);
 }
