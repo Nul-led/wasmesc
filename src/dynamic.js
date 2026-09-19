@@ -157,7 +157,7 @@ function tokenize(source) {
       continue;
     }
 
-    if ('()+-*/{},;=:.<>!'.includes(ch)) {
+    if ('()+-*/[]{},;=:.<>!'.includes(ch)) {
       tokens.push({ type: ch, value: ch, pos: i });
       i += 1;
       continue;
@@ -294,7 +294,7 @@ class Parser {
       const start = this.i;
       const target = this.parseExpression();
       if (this.maybe('=')) {
-        if (target.type !== 'id' && target.type !== 'member') {
+        if (target.type !== 'id' && target.type !== 'member' && target.type !== 'index') {
           throw new SyntaxError('Invalid assignment target');
         }
         const value = this.parseExpression();
@@ -351,6 +351,13 @@ class Parser {
         continue;
       }
 
+      if (this.maybe('[')) {
+        const index = this.parseExpression();
+        this.take(']');
+        value = { type: 'index', object: value, index };
+        continue;
+      }
+
       if (this.maybe('(')) {
         const args = [];
         if (!this.peek(')')) {
@@ -382,6 +389,17 @@ class Parser {
       const value = this.parseExpression();
       this.take(')');
       return value;
+    }
+
+    if (this.maybe('[')) {
+      const elements = [];
+      if (!this.peek(']')) {
+        do {
+          elements.push(this.parseExpression());
+        } while (this.maybe(','));
+      }
+      this.take(']');
+      return { type: 'array', elements };
     }
 
     if (this.maybe('{')) {
@@ -427,6 +445,8 @@ const Op = Object.freeze({
   f64Const: 0x44,
   i32Eqz: 0x45,
   i32Eq: 0x46,
+  i32LtS: 0x48,
+  i32GeU: 0x4f,
   i64Eq: 0x51,
   f64Eq: 0x61,
   f64Ne: 0x62,
@@ -438,6 +458,7 @@ const Op = Object.freeze({
   i32Sub: 0x6b,
   i32Mul: 0x6c,
   i32And: 0x71,
+  i32Xor: 0x73,
   i64And: 0x83,
   i64Or: 0x84,
   f64Neg: 0x9a,
@@ -446,7 +467,9 @@ const Op = Object.freeze({
   f64Mul: 0xa2,
   f64Div: 0xa3,
   i32WrapI64: 0xa7,
+  i32TruncF64S: 0xaa,
   i64ExtendI32U: 0xad,
+  f64ConvertI32U: 0xb8,
   i64ReinterpretF64: 0xbd,
   f64ReinterpretI64: 0xbf,
 });
@@ -459,9 +482,12 @@ const RuntimeFn = Object.freeze({
   numberFromF64: 4,
   truthy: 5,
   strictEqual: 6,
+  arrayNew: 7,
+  arraySet: 8,
+  arrayGet: 9,
 });
 
-const RuntimeFunctionCount = 7;
+const RuntimeFunctionCount = 10;
 
 const emptyBlock = 0x40;
 
@@ -581,12 +607,20 @@ function objectSetBody() {
       ...localGet(4),
       Op.i32Store, ...memarg(2, 0),
 
-      ...localGet(3),
-      ...localGet(3),
-      Op.i32Load, ...memarg(2, 4),
-      ...i32Const(1),
-      Op.i32Add,
-      Op.i32Store, ...memarg(2, 4),
+      ...localGet(0),
+      ...i64Const(JSValue.TAG_MASK),
+      Op.i64And,
+      ...i64Const(JSValue.ARRAY),
+      Op.i64Eq,
+      Op.if, emptyBlock,
+      Op.else,
+        ...localGet(3),
+        ...localGet(3),
+        Op.i32Load, ...memarg(2, 4),
+        ...i32Const(1),
+        Op.i32Add,
+        Op.i32Store, ...memarg(2, 4),
+      Op.end,
 
       ...localGet(0),
     ],
@@ -597,6 +631,24 @@ function objectGetBody() {
   return encodeFunctionBody({
     locals: [ValType.i32, ValType.i32],
     instructions: [
+      ...localGet(1),
+      Op.i32Eqz,
+      Op.if, emptyBlock,
+        ...localGet(0),
+        ...i64Const(JSValue.TAG_MASK),
+        Op.i64And,
+        ...i64Const(JSValue.ARRAY),
+        Op.i64Eq,
+        Op.if, emptyBlock,
+          ...localGet(0),
+          Op.i32WrapI64,
+          Op.i32Load, ...memarg(2, 4),
+          Op.f64ConvertI32U,
+          ...call(RuntimeFn.numberFromF64),
+          Op.return,
+        Op.end,
+      Op.end,
+
       ...localGet(0),
       Op.i32WrapI64,
       ...localSet(2),
@@ -729,12 +781,154 @@ function strictEqualBody() {
   });
 }
 
+function arrayNewBody() {
+  return encodeFunctionBody({
+    locals: [ValType.i32],
+    instructions: [
+      ...i32Const(8),
+      ...call(RuntimeFn.alloc),
+      ...localSet(1),
+
+      ...localGet(1),
+      ...i32Const(0),
+      Op.i32Store, ...memarg(2, 0),
+
+      ...localGet(1),
+      ...localGet(0),
+      Op.i32Store, ...memarg(2, 4),
+
+      ...i64Const(JSValue.ARRAY),
+      ...localGet(1),
+      Op.i64ExtendI32U,
+      Op.i64Or,
+    ],
+  });
+}
+
+function arraySetBody() {
+  return encodeFunctionBody({
+    locals: [ValType.i32, ValType.i32],
+    instructions: [
+      ...localGet(1),
+      ...i32Const(0),
+      Op.i32LtS,
+      Op.if, emptyBlock,
+        ...localGet(0),
+        Op.return,
+      Op.end,
+
+      ...localGet(0),
+      Op.i32WrapI64,
+      ...localSet(3),
+
+      ...localGet(1),
+      ...localGet(3),
+      Op.i32Load, ...memarg(2, 4),
+      Op.i32GeU,
+      Op.if, emptyBlock,
+        ...localGet(3),
+        ...localGet(1),
+        ...i32Const(1),
+        Op.i32Add,
+        Op.i32Store, ...memarg(2, 4),
+      Op.end,
+
+      ...i32Const(16),
+      ...call(RuntimeFn.alloc),
+      ...localSet(4),
+
+      ...localGet(4),
+      ...localGet(3),
+      Op.i32Load, ...memarg(2, 0),
+      Op.i32Store, ...memarg(2, 0),
+
+      ...localGet(4),
+      ...localGet(1),
+      ...i32Const(-2147483648),
+      Op.i32Xor,
+      Op.i32Store, ...memarg(2, 4),
+
+      ...localGet(4),
+      ...localGet(2),
+      Op.i64Store, ...memarg(3, 8),
+
+      ...localGet(3),
+      ...localGet(4),
+      Op.i32Store, ...memarg(2, 0),
+
+      ...localGet(0),
+    ],
+  });
+}
+
+function arrayGetBody() {
+  return encodeFunctionBody({
+    locals: [ValType.i32, ValType.i32, ValType.i32],
+    instructions: [
+      ...localGet(1),
+      ...i32Const(0),
+      Op.i32LtS,
+      Op.if, emptyBlock,
+        ...i64Const(JSValue.UNDEFINED),
+        Op.return,
+      Op.end,
+
+      ...localGet(0),
+      Op.i32WrapI64,
+      ...localSet(2),
+
+      ...localGet(1),
+      ...i32Const(-2147483648),
+      Op.i32Xor,
+      ...localSet(4),
+
+      ...localGet(2),
+      Op.i32Load, ...memarg(2, 0),
+      ...localSet(3),
+
+      Op.block, emptyBlock,
+        Op.loop, emptyBlock,
+          ...localGet(3),
+          Op.i32Eqz,
+          Op.brIf, ...u32(1),
+
+          ...localGet(3),
+          Op.i32Load, ...memarg(2, 4),
+          ...localGet(4),
+          Op.i32Eq,
+          Op.if, emptyBlock,
+            ...localGet(3),
+            Op.i64Load, ...memarg(3, 8),
+            Op.return,
+          Op.end,
+
+          ...localGet(3),
+          Op.i32Load, ...memarg(2, 0),
+          ...localSet(3),
+          Op.br, ...u32(0),
+        Op.end,
+      Op.end,
+
+      ...i64Const(JSValue.UNDEFINED),
+    ],
+  });
+}
+
 function collectPropertyNames(program) {
   const names = new Set();
 
   function visitExpression(node) {
     if (!node || typeof node !== 'object') return;
     if (node.type === 'string') return;
+    if (node.type === 'array') {
+      node.elements.forEach(visitExpression);
+      return;
+    }
+    if (node.type === 'index') {
+      visitExpression(node.object);
+      visitExpression(node.index);
+      return;
+    }
     if (node.type === 'object') {
       for (const property of node.properties) {
         names.add(property.key);
@@ -779,7 +973,15 @@ function collectPropertyNames(program) {
   }
 
   for (const fn of program.functions) fn.statements.forEach(visitStatement);
-  return new Map([...names].map((name, index) => [name, index + 1]));
+
+  const ids = new Map();
+  if (names.has('length')) ids.set('length', 0);
+  let next = 1;
+  for (const name of names) {
+    if (name === 'length') continue;
+    ids.set(name, next++);
+  }
+  return ids;
 }
 
 function collectStringLiterals(program) {
@@ -789,6 +991,15 @@ function collectStringLiterals(program) {
     if (!node || typeof node !== 'object') return;
     if (node.type === 'string') {
       values.add(node.value);
+      return;
+    }
+    if (node.type === 'array') {
+      node.elements.forEach(visitExpression);
+      return;
+    }
+    if (node.type === 'index') {
+      visitExpression(node.object);
+      visitExpression(node.index);
       return;
     }
     if (node.type === 'object') {
@@ -880,6 +1091,14 @@ function bindingIndex(scope, name) {
   return binding.index;
 }
 
+function compileArrayIndex(node, scope, propertyIds, functions) {
+  return [
+    ...compileExpression(node, scope, propertyIds, functions),
+    Op.f64ReinterpretI64,
+    Op.i32TruncF64S,
+  ];
+}
+
 function compileExpression(node, scope, propertyIds, functions) {
   switch (node.type) {
     case 'number':
@@ -967,6 +1186,26 @@ function compileExpression(node, scope, propertyIds, functions) {
 
       throw new SyntaxError('Unsupported binary operator: ' + node.op);
     }
+    case 'array': {
+      const instructions = [
+        ...i32Const(node.elements.length),
+        ...call(RuntimeFn.arrayNew),
+      ];
+      node.elements.forEach((element, index) => {
+        instructions.push(
+          ...i32Const(index),
+          ...compileExpression(element, scope, propertyIds, functions),
+          ...call(RuntimeFn.arraySet),
+        );
+      });
+      return instructions;
+    }
+    case 'index':
+      return [
+        ...compileExpression(node.object, scope, propertyIds, functions),
+        ...compileArrayIndex(node.index, scope, propertyIds, functions),
+        ...call(RuntimeFn.arrayGet),
+      ];
     case 'object': {
       const instructions = [
         ...i32Const(node.properties.length),
@@ -1041,6 +1280,17 @@ function compileStatements(statements, scope, locals, propertyIds, functions, la
         }
         instructions.push(...compileExpression(statement.value, scope, propertyIds, functions));
         instructions.push(...localSet(binding.index));
+        continue;
+      }
+
+      if (statement.target.type === 'index') {
+        instructions.push(
+          ...compileExpression(statement.target.object, scope, propertyIds, functions),
+          ...compileArrayIndex(statement.target.index, scope, propertyIds, functions),
+          ...compileExpression(statement.value, scope, propertyIds, functions),
+          ...call(RuntimeFn.arraySet),
+          Op.drop,
+        );
         continue;
       }
 
@@ -1188,6 +1438,9 @@ export function compileDynamic(source) {
     functionType([ValType.f64], [ValType.i64]),
     functionType([ValType.i64], [ValType.i32]),
     functionType([ValType.i64, ValType.i64], [ValType.i32]),
+    functionType([ValType.i32], [ValType.i64]),
+    functionType([ValType.i64, ValType.i32, ValType.i64], [ValType.i64]),
+    functionType([ValType.i64, ValType.i32], [ValType.i64]),
   ];
 
   const sourceTypes = program.functions.map((fn) => (
@@ -1224,6 +1477,9 @@ export function compileDynamic(source) {
     numberFromF64Body(),
     truthyBody(),
     strictEqualBody(),
+    arrayNewBody(),
+    arraySetBody(),
+    arrayGetBody(),
     ...program.functions.map((fn) => (
       compileSourceFunction(fn, propertyIds, functions, stringLayout.pointers)
     )),
