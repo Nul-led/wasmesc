@@ -438,13 +438,16 @@ const Op = Object.freeze({
   globalSet: 0x24,
   i32Load: 0x28,
   i64Load: 0x29,
+  i32Load16U: 0x2f,
   i32Store: 0x36,
   i64Store: 0x37,
+  i32Store16: 0x3b,
   i32Const: 0x41,
   i64Const: 0x42,
   f64Const: 0x44,
   i32Eqz: 0x45,
   i32Eq: 0x46,
+  i32Ne: 0x47,
   i32LtS: 0x48,
   i32GeU: 0x4f,
   i64Eq: 0x51,
@@ -485,9 +488,12 @@ const RuntimeFn = Object.freeze({
   arrayNew: 7,
   arraySet: 8,
   arrayGet: 9,
+  stringEqual: 10,
+  stringConcat: 11,
+  add: 12,
 });
 
-const RuntimeFunctionCount = 10;
+const RuntimeFunctionCount = 13;
 
 const emptyBlock = 0x40;
 
@@ -769,6 +775,37 @@ function strictEqualBody() {
       Op.end,
 
       ...localGet(0),
+      ...i64Const(JSValue.TAG_MASK),
+      Op.i64And,
+      ...i64Const(JSValue.STRING),
+      Op.i64Eq,
+      Op.if, emptyBlock,
+        ...localGet(1),
+        ...i64Const(JSValue.TAG_MASK),
+        Op.i64And,
+        ...i64Const(JSValue.STRING),
+        Op.i64Eq,
+        Op.if, emptyBlock,
+          ...localGet(0),
+          ...localGet(1),
+          ...call(RuntimeFn.stringEqual),
+          Op.return,
+        Op.end,
+        ...i32Const(0),
+        Op.return,
+      Op.end,
+
+      ...localGet(1),
+      ...i64Const(JSValue.TAG_MASK),
+      Op.i64And,
+      ...i64Const(JSValue.STRING),
+      Op.i64Eq,
+      Op.if, emptyBlock,
+        ...i32Const(0),
+        Op.return,
+      Op.end,
+
+      ...localGet(0),
       Op.f64ReinterpretI64,
       ...f64Const(0),
       Op.f64Eq,
@@ -910,6 +947,245 @@ function arrayGetBody() {
       Op.end,
 
       ...i64Const(JSValue.UNDEFINED),
+    ],
+  });
+}
+
+function stringEqualBody() {
+  return encodeFunctionBody({
+    locals: [ValType.i32, ValType.i32, ValType.i32, ValType.i32],
+    instructions: [
+      ...localGet(0),
+      Op.i32WrapI64,
+      ...localSet(2),
+
+      ...localGet(1),
+      Op.i32WrapI64,
+      ...localSet(3),
+
+      ...localGet(2),
+      Op.i32Load, ...memarg(2, 0),
+      ...localGet(3),
+      Op.i32Load, ...memarg(2, 0),
+      Op.i32Ne,
+      Op.if, emptyBlock,
+        ...i32Const(0),
+        Op.return,
+      Op.end,
+
+      ...localGet(2),
+      Op.i32Load, ...memarg(2, 0),
+      ...localSet(4),
+
+      ...i32Const(0),
+      ...localSet(5),
+
+      Op.block, emptyBlock,
+        Op.loop, emptyBlock,
+          ...localGet(5),
+          ...localGet(4),
+          Op.i32GeU,
+          Op.brIf, ...u32(1),
+
+          ...localGet(2),
+          ...i32Const(4),
+          Op.i32Add,
+          ...localGet(5),
+          ...i32Const(2),
+          Op.i32Mul,
+          Op.i32Add,
+          Op.i32Load16U, ...memarg(1, 0),
+
+          ...localGet(3),
+          ...i32Const(4),
+          Op.i32Add,
+          ...localGet(5),
+          ...i32Const(2),
+          Op.i32Mul,
+          Op.i32Add,
+          Op.i32Load16U, ...memarg(1, 0),
+
+          Op.i32Ne,
+          Op.if, emptyBlock,
+            ...i32Const(0),
+            Op.return,
+          Op.end,
+
+          ...localGet(5),
+          ...i32Const(1),
+          Op.i32Add,
+          ...localSet(5),
+          Op.br, ...u32(0),
+        Op.end,
+      Op.end,
+
+      ...i32Const(1),
+    ],
+  });
+}
+
+function stringConcatBody() {
+  return encodeFunctionBody({
+    locals: [
+      ValType.i32, ValType.i32, ValType.i32, ValType.i32,
+      ValType.i32, ValType.i32, ValType.i32,
+    ],
+    instructions: [
+      ...localGet(0),
+      Op.i32WrapI64,
+      ...localSet(2),
+
+      ...localGet(1),
+      Op.i32WrapI64,
+      ...localSet(3),
+
+      ...localGet(2),
+      Op.i32Load, ...memarg(2, 0),
+      ...localSet(4),
+
+      ...localGet(3),
+      Op.i32Load, ...memarg(2, 0),
+      ...localSet(5),
+
+      ...localGet(4),
+      ...localGet(5),
+      Op.i32Add,
+      ...localSet(8),
+
+      ...i32Const(4),
+      ...localGet(8),
+      ...i32Const(2),
+      Op.i32Mul,
+      Op.i32Add,
+      ...call(RuntimeFn.alloc),
+      ...localSet(6),
+
+      ...localGet(6),
+      ...localGet(8),
+      Op.i32Store, ...memarg(2, 0),
+
+      ...i32Const(0),
+      ...localSet(7),
+
+      Op.block, emptyBlock,
+        Op.loop, emptyBlock,
+          ...localGet(7),
+          ...localGet(4),
+          Op.i32GeU,
+          Op.brIf, ...u32(1),
+
+          ...localGet(6),
+          ...i32Const(4),
+          Op.i32Add,
+          ...localGet(7),
+          ...i32Const(2),
+          Op.i32Mul,
+          Op.i32Add,
+
+          ...localGet(2),
+          ...i32Const(4),
+          Op.i32Add,
+          ...localGet(7),
+          ...i32Const(2),
+          Op.i32Mul,
+          Op.i32Add,
+          Op.i32Load16U, ...memarg(1, 0),
+          Op.i32Store16, ...memarg(1, 0),
+
+          ...localGet(7),
+          ...i32Const(1),
+          Op.i32Add,
+          ...localSet(7),
+          Op.br, ...u32(0),
+        Op.end,
+      Op.end,
+
+      ...i32Const(0),
+      ...localSet(7),
+
+      Op.block, emptyBlock,
+        Op.loop, emptyBlock,
+          ...localGet(7),
+          ...localGet(5),
+          Op.i32GeU,
+          Op.brIf, ...u32(1),
+
+          ...localGet(6),
+          ...i32Const(4),
+          Op.i32Add,
+          ...localGet(4),
+          ...localGet(7),
+          Op.i32Add,
+          ...i32Const(2),
+          Op.i32Mul,
+          Op.i32Add,
+
+          ...localGet(3),
+          ...i32Const(4),
+          Op.i32Add,
+          ...localGet(7),
+          ...i32Const(2),
+          Op.i32Mul,
+          Op.i32Add,
+          Op.i32Load16U, ...memarg(1, 0),
+          Op.i32Store16, ...memarg(1, 0),
+
+          ...localGet(7),
+          ...i32Const(1),
+          Op.i32Add,
+          ...localSet(7),
+          Op.br, ...u32(0),
+        Op.end,
+      Op.end,
+
+      ...i64Const(JSValue.STRING),
+      ...localGet(6),
+      Op.i64ExtendI32U,
+      Op.i64Or,
+    ],
+  });
+}
+
+function addBody() {
+  return encodeFunctionBody({
+    instructions: [
+      ...localGet(0),
+      ...i64Const(JSValue.TAG_MASK),
+      Op.i64And,
+      ...i64Const(JSValue.STRING),
+      Op.i64Eq,
+      Op.if, emptyBlock,
+        ...localGet(1),
+        ...i64Const(JSValue.TAG_MASK),
+        Op.i64And,
+        ...i64Const(JSValue.STRING),
+        Op.i64Eq,
+        Op.if, emptyBlock,
+          ...localGet(0),
+          ...localGet(1),
+          ...call(RuntimeFn.stringConcat),
+          Op.return,
+        Op.end,
+        ...i64Const(JSValue.UNDEFINED),
+        Op.return,
+      Op.end,
+
+      ...localGet(1),
+      ...i64Const(JSValue.TAG_MASK),
+      Op.i64And,
+      ...i64Const(JSValue.STRING),
+      Op.i64Eq,
+      Op.if, emptyBlock,
+        ...i64Const(JSValue.UNDEFINED),
+        Op.return,
+      Op.end,
+
+      ...localGet(0),
+      Op.f64ReinterpretI64,
+      ...localGet(1),
+      Op.f64ReinterpretI64,
+      Op.f64Add,
+      ...call(RuntimeFn.numberFromF64),
     ],
   });
 }
@@ -1139,8 +1415,15 @@ function compileExpression(node, scope, propertyIds, functions) {
       ];
     }
     case 'binary': {
+      if (node.op === '+') {
+        return [
+          ...compileExpression(node.left, scope, propertyIds, functions),
+          ...compileExpression(node.right, scope, propertyIds, functions),
+          ...call(RuntimeFn.add),
+        ];
+      }
+
       const arithmeticOpcode = {
-        '+': Op.f64Add,
         '-': Op.f64Sub,
         '*': Op.f64Mul,
         '/': Op.f64Div,
@@ -1441,6 +1724,9 @@ export function compileDynamic(source) {
     functionType([ValType.i32], [ValType.i64]),
     functionType([ValType.i64, ValType.i32, ValType.i64], [ValType.i64]),
     functionType([ValType.i64, ValType.i32], [ValType.i64]),
+    functionType([ValType.i64, ValType.i64], [ValType.i32]),
+    functionType([ValType.i64, ValType.i64], [ValType.i64]),
+    functionType([ValType.i64, ValType.i64], [ValType.i64]),
   ];
 
   const sourceTypes = program.functions.map((fn) => (
@@ -1467,6 +1753,7 @@ export function compileDynamic(source) {
       ...u32(functions.get(fn.name).index),
     ]);
   exports.push([...wasmString('memory'), 0x02, ...u32(0)]);
+  exports.push([...wasmString('__wasmesc_alloc'), 0x00, ...u32(RuntimeFn.alloc)]);
   const exportSection = section(7, vec(exports));
 
   const codeSection = section(10, vec([
@@ -1480,6 +1767,9 @@ export function compileDynamic(source) {
     arrayNewBody(),
     arraySetBody(),
     arrayGetBody(),
+    stringEqualBody(),
+    stringConcatBody(),
+    addBody(),
     ...program.functions.map((fn) => (
       compileSourceFunction(fn, propertyIds, functions, stringLayout.pointers)
     )),

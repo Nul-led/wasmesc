@@ -25,12 +25,35 @@ export function bitsToNumber(bits) {
   return bitsView.getFloat64(0, true);
 }
 
-export function encodeJSValue(value) {
+export function encodeJSValue(value, embedding = null) {
   if (typeof value === 'number') return numberToBits(value);
   if (value === undefined) return JSValue.UNDEFINED;
   if (value === null) return JSValue.NULL;
   if (value === false) return JSValue.FALSE;
   if (value === true) return JSValue.TRUE;
+
+  if (typeof value === 'string') {
+    const memory = embedding?.memory;
+    const alloc = embedding?.alloc;
+    if (memory === undefined || typeof alloc !== 'function') {
+      throw new TypeError(
+        'Encoding a string requires { memory, alloc } from a wasmesc instance',
+      );
+    }
+
+    const byteLength = 4 + value.length * 2;
+    const allocationSize = Math.ceil(byteLength / 8) * 8;
+    const pointer = Number(alloc(allocationSize));
+    const view = new DataView(memoryBuffer(memory));
+    view.setUint32(pointer, value.length, true);
+
+    for (let i = 0; i < value.length; i += 1) {
+      view.setUint16(pointer + 4 + i * 2, value.charCodeAt(i), true);
+    }
+
+    return JSValue.STRING | BigInt(pointer);
+  }
+
   throw new TypeError(`Cannot encode ${typeof value} as a wasmesc JSValue yet`);
 }
 
@@ -41,7 +64,7 @@ function payloadPointer(bits) {
 function memoryBuffer(memory) {
   const buffer = memory?.buffer ?? memory;
   if (!(buffer instanceof ArrayBuffer)) {
-    throw new TypeError('Decoding a string JSValue requires WebAssembly.Memory or an ArrayBuffer');
+    throw new TypeError('Expected WebAssembly.Memory or an ArrayBuffer');
   }
   return buffer;
 }

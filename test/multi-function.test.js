@@ -24,7 +24,11 @@ test('supports forward direct calls between source functions', async () => {
   assert.deepEqual(WebAssembly.Module.imports(module), []);
   assert.deepEqual(
     WebAssembly.Module.exports(module).map((x) => [x.name, x.kind]),
-    [['answer', 'function'], ['memory', 'memory']],
+    [
+      ['answer', 'function'],
+      ['memory', 'memory'],
+      ['__wasmesc_alloc', 'function'],
+    ],
   );
   assert.equal(decodeJSValue(instance.exports.answer()), 42);
 });
