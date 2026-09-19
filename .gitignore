@@ -1,0 +1,15 @@
+# OS / editor noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Common build / dependency output
+node_modules/
+dist/
+build/
+target/
+
+# Logs / temp files
+*.log
+*.tmp
