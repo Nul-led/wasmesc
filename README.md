@@ -58,19 +58,19 @@ Objects live entirely in ordinary Wasm linear memory. There are no GC structs or
 Current object layout:
 
 ```text
-+0   capacity : i32
-+4   used     : i32
-+8   entry 0
-+24  entry 1
-...
+object:
++0   head entry pointer : i32
++4   property-write count : i32
 
 entry:
-+0   property id : i32
-+4   padding
-+8   JSValue     : i64
++0   next entry pointer : i32
++4   property id        : i32
++8   JSValue            : i64
 ```
 
-Static property names are interned by the compiler to unique integer IDs, so this first version does not need string storage or hashing.
+Each property write prepends a 16-byte entry. Reads walk newest-to-oldest, which naturally gives last-write-wins behavior and lets object literals grow later through assignment without a fixed-capacity object buffer.
+
+Static property names are interned by the compiler to unique integer IDs, so this version does not need string storage or hashing.
 
 Example:
 
@@ -101,7 +101,7 @@ console.log(WebAssembly.Module.imports(module)); // []
 
 Dynamic function parameters/results use the tagged `i64` ABI. JavaScript therefore sees them as `bigint`; `src/jsvalue.js` contains `encodeJSValue()` and `decodeJSValue()` helpers for tests and embedding.
 
-The dynamic subset currently supports numeric arithmetic and comparisons, strict equality/inequality (`===`, `!==`), unary `!`, JavaScript-style truthiness for the represented value kinds, `if`/`else`, `else if`, mutable `let`/parameter bindings, `while` loops, primitive literals (`true`, `false`, `null`, `undefined`), object literals, nested objects, static member reads, locals, parameters, and return values. Function fallthrough produces `undefined`. It is intentionally not pretending to implement all JavaScript coercion rules yet.
+The dynamic subset currently supports numeric arithmetic and comparisons, strict equality/inequality (`===`, `!==`), unary `!`, JavaScript-style truthiness for the represented value kinds, `if`/`else`, `else if`, mutable `let`/parameter bindings, `while` loops, primitive literals (`true`, `false`, `null`, `undefined`), object literals, nested objects, static member reads and writes, locals, parameters, and return values. Property assignment supports new keys, overwrites, aliases, and nested member chains. Function fallthrough produces `undefined`. It is intentionally not pretending to implement all JavaScript coercion rules yet.
 
 ## Pipeline
 
@@ -115,7 +115,6 @@ The binary encoder is dependency-free and writes sections/opcodes directly.
 
 A useful next sequence is:
 
-- property assignment;
 - `break` / `continue` and richer expression statements;
 - multiple compiled functions and calls;
 - strings in linear memory;
@@ -135,7 +134,7 @@ That includes edge cases produced naturally by floating-point arithmetic such as
 npm test
 ```
 
-Tests verify that generated modules have zero imports, tagged primitive values round-trip, nested objects live in linear memory, duplicate object-literal keys use last-write-wins behavior, missing properties produce `undefined`, arithmetic matches Node on the differential corpus, and comparisons/control flow preserve the current tagged-value semantics.
+Tests verify that generated modules have zero imports, tagged primitive values round-trip, nested objects live in linear memory, property reads/writes preserve aliasing and last-write-wins behavior, missing properties produce `undefined`, arithmetic matches Node on the differential corpus, and comparisons/control flow preserve the current tagged-value semantics.
 
 ## Reference
 
