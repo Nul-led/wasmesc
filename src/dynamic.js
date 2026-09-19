@@ -491,9 +491,10 @@ const RuntimeFn = Object.freeze({
   stringEqual: 10,
   stringConcat: 11,
   add: 12,
+  arraySetLength: 13,
 });
 
-const RuntimeFunctionCount = 13;
+const RuntimeFunctionCount = 14;
 
 const emptyBlock = 0x40;
 
@@ -588,6 +589,22 @@ function objectSetBody() {
   return encodeFunctionBody({
     locals: [ValType.i32, ValType.i32],
     instructions: [
+      ...localGet(0),
+      ...i64Const(JSValue.TAG_MASK),
+      Op.i64And,
+      ...i64Const(JSValue.ARRAY),
+      Op.i64Eq,
+      Op.if, emptyBlock,
+        ...localGet(1),
+        Op.i32Eqz,
+        Op.if, emptyBlock,
+          ...localGet(0),
+          ...localGet(2),
+          ...call(RuntimeFn.arraySetLength),
+          Op.return,
+        Op.end,
+      Op.end,
+
       ...localGet(0),
       Op.i32WrapI64,
       ...localSet(3),
@@ -915,6 +932,15 @@ function arrayGetBody() {
       ...localSet(2),
 
       ...localGet(1),
+      ...localGet(2),
+      Op.i32Load, ...memarg(2, 4),
+      Op.i32GeU,
+      Op.if, emptyBlock,
+        ...i64Const(JSValue.UNDEFINED),
+        Op.return,
+      Op.end,
+
+      ...localGet(1),
       ...i32Const(-2147483648),
       Op.i32Xor,
       ...localSet(4),
@@ -1186,6 +1212,118 @@ function addBody() {
       Op.f64ReinterpretI64,
       Op.f64Add,
       ...call(RuntimeFn.numberFromF64),
+    ],
+  });
+}
+
+function arraySetLengthBody() {
+  return encodeFunctionBody({
+    locals: [
+      ValType.i32, ValType.i32, ValType.i32, ValType.i32,
+      ValType.i32, ValType.i32, ValType.i32, ValType.i32,
+    ],
+    instructions: [
+      ...localGet(0),
+      Op.i32WrapI64,
+      ...localSet(2),
+
+      ...localGet(1),
+      Op.f64ReinterpretI64,
+      Op.i32TruncF64S,
+      ...localSet(3),
+
+      ...localGet(3),
+      ...i32Const(0),
+      Op.i32LtS,
+      Op.if, emptyBlock,
+        ...localGet(0),
+        Op.return,
+      Op.end,
+
+      ...localGet(3),
+      ...localGet(2),
+      Op.i32Load, ...memarg(2, 4),
+      Op.i32GeU,
+      Op.if, emptyBlock,
+        ...localGet(2),
+        ...localGet(3),
+        Op.i32Store, ...memarg(2, 4),
+        ...localGet(0),
+        Op.return,
+      Op.end,
+
+      ...i32Const(0),
+      ...localSet(4),
+
+      ...localGet(2),
+      Op.i32Load, ...memarg(2, 0),
+      ...localSet(5),
+
+      Op.block, emptyBlock,
+        Op.loop, emptyBlock,
+          ...localGet(5),
+          Op.i32Eqz,
+          Op.brIf, ...u32(1),
+
+          ...localGet(5),
+          Op.i32Load, ...memarg(2, 0),
+          ...localSet(6),
+
+          ...localGet(5),
+          Op.i32Load, ...memarg(2, 4),
+          ...localSet(7),
+
+          ...i32Const(0),
+          ...localSet(9),
+
+          ...localGet(7),
+          ...i32Const(0),
+          Op.i32LtS,
+          Op.if, emptyBlock,
+            ...localGet(7),
+            ...i32Const(-2147483648),
+            Op.i32Xor,
+            ...localSet(8),
+
+            ...localGet(8),
+            ...localGet(3),
+            Op.i32GeU,
+            Op.if, emptyBlock,
+              ...localGet(4),
+              Op.i32Eqz,
+              Op.if, emptyBlock,
+                ...localGet(2),
+                ...localGet(6),
+                Op.i32Store, ...memarg(2, 0),
+              Op.else,
+                ...localGet(4),
+                ...localGet(6),
+                Op.i32Store, ...memarg(2, 0),
+              Op.end,
+
+              ...i32Const(1),
+              ...localSet(9),
+            Op.end,
+          Op.end,
+
+          ...localGet(9),
+          Op.i32Eqz,
+          Op.if, emptyBlock,
+            ...localGet(5),
+            ...localSet(4),
+          Op.end,
+
+          ...localGet(6),
+          ...localSet(5),
+          Op.br, ...u32(0),
+        Op.end,
+      Op.end,
+
+      ...localGet(2),
+      ...localGet(3),
+      Op.i32Store, ...memarg(2, 4),
+
+      ...localGet(0),
     ],
   });
 }
@@ -1727,6 +1865,7 @@ export function compileDynamic(source) {
     functionType([ValType.i64, ValType.i64], [ValType.i32]),
     functionType([ValType.i64, ValType.i64], [ValType.i64]),
     functionType([ValType.i64, ValType.i64], [ValType.i64]),
+    functionType([ValType.i64, ValType.i64], [ValType.i64]),
   ];
 
   const sourceTypes = program.functions.map((fn) => (
@@ -1770,6 +1909,7 @@ export function compileDynamic(source) {
     stringEqualBody(),
     stringConcatBody(),
     addBody(),
+    arraySetLengthBody(),
     ...program.functions.map((fn) => (
       compileSourceFunction(fn, propertyIds, functions, stringLayout.pointers)
     )),
