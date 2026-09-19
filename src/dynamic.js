@@ -1,6 +1,7 @@
 import {
   ValType,
   encodeFunctionBody,
+  f64Bytes,
   functionType,
   moduleBytes,
   s32,
@@ -15,7 +16,10 @@ import { JSValue, numberToBits } from './jsvalue.js';
 const KEYWORDS = new Set([
   'export', 'function', 'return', 'let', 'const',
   'true', 'false', 'null', 'undefined',
+  'if', 'else', 'while',
 ]);
+
+const MULTI_CHAR_TOKENS = ['===', '!==', '<=', '>='];
 
 function tokenize(source) {
   const tokens = [];
@@ -54,7 +58,14 @@ function tokenize(source) {
       continue;
     }
 
-    if ('()+-*/{},;=:.'.includes(ch)) {
+    const multi = MULTI_CHAR_TOKENS.find((token) => source.startsWith(token, i));
+    if (multi) {
+      tokens.push({ type: multi, value: multi, pos: i });
+      i += multi.length;
+      continue;
+    }
+
+    if ('()+-*/{},;=:.<>!'.includes(ch)) {
       tokens.push({ type: ch, value: ch, pos: i });
       i += 1;
       continue;
@@ -77,6 +88,10 @@ class Parser {
     return this.tokens[this.i].type === type;
   }
 
+  peekNext(type) {
+    return this.tokens[this.i + 1]?.type === type;
+  }
+
   take(type) {
     const token = this.tokens[this.i];
     if (token.type !== type) {
@@ -91,6 +106,14 @@ class Parser {
     return this.take(type);
   }
 
+  parseBlock() {
+    this.take('{');
+    const statements = [];
+    while (!this.peek('}')) statements.push(this.parseStatement());
+    this.take('}');
+    return statements;
+  }
+
   parseProgram() {
     this.maybe('export');
     this.take('function');
@@ -103,16 +126,9 @@ class Parser {
       } while (this.maybe(','));
     }
     this.take(')');
-    this.take('{');
-
-    const statements = [];
-    while (!this.peek('}')) statements.push(this.parseStatement());
-    this.take('}');
+    const statements = this.parseBlock();
     this.take('eof');
 
-    if (!statements.some((s) => s.type === 'return')) {
-      throw new SyntaxError('Function must contain a return statement');
-    }
     if (new Set(params).size !== params.length) throw new SyntaxError('Duplicate parameter');
 
     return { type: 'function', name, params, statements };
@@ -134,13 +150,52 @@ class Parser {
       return { type: 'return', value };
     }
 
+    if (this.maybe('if')) {
+      this.take('(');
+      const test = this.parseExpression();
+      this.take(')');
+      const consequent = this.parseBlock();
+      let alternate = null;
+      if (this.maybe('else')) {
+        alternate = this.peek('if') ? [this.parseStatement()] : this.parseBlock();
+      }
+      return { type: 'if', test, consequent, alternate };
+    }
+
+    if (this.maybe('while')) {
+      this.take('(');
+      const test = this.parseExpression();
+      this.take(')');
+      const body = this.parseBlock();
+      return { type: 'while', test, body };
+    }
+
+    if (this.peek('id') && this.peekNext('=')) {
+      const name = this.take('id').value;
+      this.take('=');
+      const value = this.parseExpression();
+      this.maybe(';');
+      return { type: 'assign', name, value };
+    }
+
     const token = this.tokens[this.i];
-    throw new SyntaxError(`Unsupported statement at ${token.pos}`);
+    throw new SyntaxError('Unsupported statement at ' + token.pos);
   }
 
   parseExpression(minPrecedence = 0) {
     let left = this.parseUnary();
-    const precedence = { '+': 1, '-': 1, '*': 2, '/': 2 };
+    const precedence = {
+      '===': 0,
+      '!==': 0,
+      '<': 1,
+      '<=': 1,
+      '>': 1,
+      '>=': 1,
+      '+': 2,
+      '-': 2,
+      '*': 3,
+      '/': 3,
+    };
 
     while (true) {
       const op = this.tokens[this.i].type;
@@ -156,6 +211,7 @@ class Parser {
   parseUnary() {
     if (this.maybe('-')) return { type: 'unary', op: '-', value: this.parseUnary() };
     if (this.maybe('+')) return { type: 'unary', op: '+', value: this.parseUnary() };
+    if (this.maybe('!')) return { type: 'unary', op: '!', value: this.parseUnary() };
     return this.parsePostfix();
   }
 
@@ -220,12 +276,20 @@ const Op = Object.freeze({
   i64Store: 0x37,
   i32Const: 0x41,
   i64Const: 0x42,
+  f64Const: 0x44,
   i32Eqz: 0x45,
   i32Eq: 0x46,
+  i64Eq: 0x51,
+  f64Eq: 0x61,
   f64Ne: 0x62,
+  f64Lt: 0x63,
+  f64Gt: 0x64,
+  f64Le: 0x65,
+  f64Ge: 0x66,
   i32Add: 0x6a,
   i32Sub: 0x6b,
   i32Mul: 0x6c,
+  i32And: 0x71,
   i64Or: 0x84,
   f64Neg: 0x9a,
   f64Add: 0xa0,
@@ -244,7 +308,9 @@ const RuntimeFn = Object.freeze({
   objectSet: 2,
   objectGet: 3,
   numberFromF64: 4,
-  main: 5,
+  truthy: 5,
+  strictEqual: 6,
+  main: 7,
 });
 
 const emptyBlock = 0x40;
@@ -255,6 +321,10 @@ function i32Const(value) {
 
 function i64Const(value) {
   return [Op.i64Const, ...s64(value)];
+}
+
+function f64Const(value) {
+  return [Op.f64Const, ...f64Bytes(value)];
 }
 
 function localGet(index) {
@@ -271,6 +341,17 @@ function call(index) {
 
 function memarg(align, offset = 0) {
   return [...u32(align), ...u32(offset)];
+}
+
+function booleanFromI32(instructions) {
+  return [
+    ...instructions,
+    Op.if, ValType.i64,
+      ...i64Const(JSValue.TRUE),
+    Op.else,
+      ...i64Const(JSValue.FALSE),
+    Op.end,
+  ];
 }
 
 function allocBody() {
@@ -409,7 +490,6 @@ function objectGetBody() {
 }
 
 function numberFromF64Body() {
-  // Arithmetic NaNs are canonicalized so they cannot collide with tagged values.
   return encodeFunctionBody({
     instructions: [
       ...localGet(0),
@@ -425,37 +505,119 @@ function numberFromF64Body() {
   });
 }
 
+function truthyBody() {
+  const falseyTags = [JSValue.UNDEFINED, JSValue.NULL, JSValue.FALSE, JSValue.CANONICAL_NAN];
+  const instructions = [];
+
+  for (const value of falseyTags) {
+    instructions.push(
+      ...localGet(0),
+      ...i64Const(value),
+      Op.i64Eq,
+      Op.if, emptyBlock,
+        ...i32Const(0),
+        Op.return,
+      Op.end,
+    );
+  }
+
+  instructions.push(
+    ...localGet(0),
+    Op.f64ReinterpretI64,
+    ...f64Const(0),
+    Op.f64Ne,
+  );
+
+  return encodeFunctionBody({ instructions });
+}
+
+function strictEqualBody() {
+  return encodeFunctionBody({
+    instructions: [
+      ...localGet(0),
+      ...i64Const(JSValue.CANONICAL_NAN),
+      Op.i64Eq,
+      Op.if, emptyBlock,
+        ...i32Const(0),
+        Op.return,
+      Op.end,
+
+      ...localGet(1),
+      ...i64Const(JSValue.CANONICAL_NAN),
+      Op.i64Eq,
+      Op.if, emptyBlock,
+        ...i32Const(0),
+        Op.return,
+      Op.end,
+
+      ...localGet(0),
+      ...localGet(1),
+      Op.i64Eq,
+      Op.if, emptyBlock,
+        ...i32Const(1),
+        Op.return,
+      Op.end,
+
+      ...localGet(0),
+      Op.f64ReinterpretI64,
+      ...f64Const(0),
+      Op.f64Eq,
+      ...localGet(1),
+      Op.f64ReinterpretI64,
+      ...f64Const(0),
+      Op.f64Eq,
+      Op.i32And,
+    ],
+  });
+}
+
 function collectPropertyNames(ast) {
   const names = new Set();
 
-  function visit(node) {
+  function visitExpression(node) {
     if (!node || typeof node !== 'object') return;
     if (node.type === 'object') {
       for (const property of node.properties) {
         names.add(property.key);
-        visit(property.value);
+        visitExpression(property.value);
       }
       return;
     }
     if (node.type === 'member') {
       names.add(node.property);
-      visit(node.object);
+      visitExpression(node.object);
       return;
     }
     if (node.type === 'binary') {
-      visit(node.left);
-      visit(node.right);
+      visitExpression(node.left);
+      visitExpression(node.right);
       return;
     }
-    if (node.type === 'unary') visit(node.value);
+    if (node.type === 'unary') visitExpression(node.value);
   }
 
-  for (const statement of ast.statements) {
-    if (statement.type === 'var') visit(statement.init);
-    else if (statement.type === 'return') visit(statement.value);
+  function visitStatement(statement) {
+    if (statement.type === 'var') visitExpression(statement.init);
+    else if (statement.type === 'assign') visitExpression(statement.value);
+    else if (statement.type === 'return') visitExpression(statement.value);
+    else if (statement.type === 'if') {
+      visitExpression(statement.test);
+      statement.consequent.forEach(visitStatement);
+      statement.alternate?.forEach(visitStatement);
+    } else if (statement.type === 'while') {
+      visitExpression(statement.test);
+      statement.body.forEach(visitStatement);
+    }
   }
 
+  ast.statements.forEach(visitStatement);
   return new Map([...names].map((name, index) => [name, index + 1]));
+}
+
+function bindingIndex(scope, name) {
+  const binding = scope.get(name);
+  if (!binding) throw new ReferenceError('Unknown identifier: ' + name);
+  return binding.index;
 }
 
 function compileExpression(node, scope, propertyIds) {
@@ -469,14 +631,18 @@ function compileExpression(node, scope, propertyIds) {
             : JSValue.FALSE;
       return i64Const(bits);
     }
-    case 'id': {
-      const index = scope.get(node.name);
-      if (index === undefined) throw new ReferenceError(`Unknown identifier: ${node.name}`);
-      return localGet(index);
-    }
+    case 'id':
+      return localGet(bindingIndex(scope, node.name));
     case 'unary': {
       const value = compileExpression(node.value, scope, propertyIds);
       if (node.op === '+') return value;
+      if (node.op === '!') {
+        return booleanFromI32([
+          ...value,
+          ...call(RuntimeFn.truthy),
+          Op.i32Eqz,
+        ]);
+      }
       return [
         ...value,
         Op.f64ReinterpretI64,
@@ -485,20 +651,52 @@ function compileExpression(node, scope, propertyIds) {
       ];
     }
     case 'binary': {
-      const opcode = {
+      const arithmeticOpcode = {
         '+': Op.f64Add,
         '-': Op.f64Sub,
         '*': Op.f64Mul,
         '/': Op.f64Div,
       }[node.op];
-      return [
-        ...compileExpression(node.left, scope, propertyIds),
-        Op.f64ReinterpretI64,
-        ...compileExpression(node.right, scope, propertyIds),
-        Op.f64ReinterpretI64,
-        opcode,
-        ...call(RuntimeFn.numberFromF64),
-      ];
+
+      if (arithmeticOpcode !== undefined) {
+        return [
+          ...compileExpression(node.left, scope, propertyIds),
+          Op.f64ReinterpretI64,
+          ...compileExpression(node.right, scope, propertyIds),
+          Op.f64ReinterpretI64,
+          arithmeticOpcode,
+          ...call(RuntimeFn.numberFromF64),
+        ];
+      }
+
+      const relationalOpcode = {
+        '<': Op.f64Lt,
+        '<=': Op.f64Le,
+        '>': Op.f64Gt,
+        '>=': Op.f64Ge,
+      }[node.op];
+
+      if (relationalOpcode !== undefined) {
+        return booleanFromI32([
+          ...compileExpression(node.left, scope, propertyIds),
+          Op.f64ReinterpretI64,
+          ...compileExpression(node.right, scope, propertyIds),
+          Op.f64ReinterpretI64,
+          relationalOpcode,
+        ]);
+      }
+
+      if (node.op === '===' || node.op === '!==') {
+        const condition = [
+          ...compileExpression(node.left, scope, propertyIds),
+          ...compileExpression(node.right, scope, propertyIds),
+          ...call(RuntimeFn.strictEqual),
+        ];
+        if (node.op === '!==') condition.push(Op.i32Eqz);
+        return booleanFromI32(condition);
+      }
+
+      throw new SyntaxError('Unsupported binary operator: ' + node.op);
     }
     case 'object': {
       const instructions = [
@@ -521,8 +719,82 @@ function compileExpression(node, scope, propertyIds) {
         ...call(RuntimeFn.objectGet),
       ];
     default:
-      throw new Error(`Unknown AST node: ${node.type}`);
+      throw new Error('Unknown AST node: ' + node.type);
   }
+}
+
+function compileStatements(statements, scope, locals, propertyIds) {
+  const instructions = [];
+
+  for (const statement of statements) {
+    if (statement.type === 'var') {
+      if (scope.has(statement.name)) throw new SyntaxError('Duplicate local: ' + statement.name);
+      const localIndex = scope.paramCount + locals.length;
+      instructions.push(...compileExpression(statement.init, scope, propertyIds));
+      instructions.push(...localSet(localIndex));
+      locals.push(ValType.i64);
+      scope.set(statement.name, { index: localIndex, kind: statement.kind });
+      continue;
+    }
+
+    if (statement.type === 'assign') {
+      const binding = scope.get(statement.name);
+      if (!binding) throw new ReferenceError('Unknown identifier: ' + statement.name);
+      if (binding.kind === 'const') throw new TypeError('Assignment to constant variable: ' + statement.name);
+      instructions.push(...compileExpression(statement.value, scope, propertyIds));
+      instructions.push(...localSet(binding.index));
+      continue;
+    }
+
+    if (statement.type === 'return') {
+      instructions.push(...compileExpression(statement.value, scope, propertyIds));
+      instructions.push(Op.return);
+      continue;
+    }
+
+    if (statement.type === 'if') {
+      instructions.push(
+        ...compileExpression(statement.test, scope, propertyIds),
+        ...call(RuntimeFn.truthy),
+        Op.if, emptyBlock,
+        ...compileStatements(statement.consequent, childScope(scope), locals, propertyIds),
+      );
+      if (statement.alternate) {
+        instructions.push(
+          Op.else,
+          ...compileStatements(statement.alternate, childScope(scope), locals, propertyIds),
+        );
+      }
+      instructions.push(Op.end);
+      continue;
+    }
+
+    if (statement.type === 'while') {
+      instructions.push(
+        Op.block, emptyBlock,
+          Op.loop, emptyBlock,
+            ...compileExpression(statement.test, scope, propertyIds),
+            ...call(RuntimeFn.truthy),
+            Op.i32Eqz,
+            Op.brIf, ...u32(1),
+            ...compileStatements(statement.body, childScope(scope), locals, propertyIds),
+            Op.br, ...u32(0),
+          Op.end,
+        Op.end,
+      );
+      continue;
+    }
+
+    throw new Error('Unknown statement type: ' + statement.type);
+  }
+
+  return instructions;
+}
+
+function childScope(parent) {
+  const scope = new Map(parent);
+  scope.paramCount = parent.paramCount;
+  return scope;
 }
 
 export function parseDynamic(source) {
@@ -530,6 +802,62 @@ export function parseDynamic(source) {
 }
 
 export function compileDynamic(source) {
+  const ast = parseDynamic(source);
+  const propertyIds = collectPropertyNames(ast);
+  const scope = new Map();
+  scope.paramCount = ast.params.length;
+  ast.params.forEach((name, index) => scope.set(name, { index, kind: 'param' }));
+
+  const locals = [];
+  const instructions = compileStatements(ast.statements, scope, locals, propertyIds);
+  instructions.push(...i64Const(JSValue.UNDEFINED));
+
+  const types = [
+    functionType([ValType.i32], [ValType.i32]),
+    functionType([ValType.i32], [ValType.i64]),
+    functionType([ValType.i64, ValType.i32, ValType.i64], [ValType.i64]),
+    functionType([ValType.i64, ValType.i32], [ValType.i64]),
+    functionType([ValType.f64], [ValType.i64]),
+    functionType([ValType.i64], [ValType.i32]),
+    functionType([ValType.i64, ValType.i64], [ValType.i32]),
+    functionType(ast.params.map(() => ValType.i64), [ValType.i64]),
+  ];
+
+  const typeSection = section(1, vec(types));
+  const functionSection = section(3, vec([
+    [...u32(0)], [...u32(1)], [...u32(2)], [...u32(3)],
+    [...u32(4)], [...u32(5)], [...u32(6)], [...u32(7)],
+  ]));
+  const memorySection = section(5, vec([[0x00, ...u32(1)]]));
+  const globalSection = section(6, vec([[
+    ValType.i32, 0x01,
+    Op.i32Const, ...s32(1024), Op.end,
+  ]]));
+  const exportSection = section(7, vec([
+    [...wasmString(ast.name), 0x00, ...u32(RuntimeFn.main)],
+    [...wasmString('memory'), 0x02, ...u32(0)],
+  ]));
+  const codeSection = section(10, vec([
+    allocBody(),
+    objectNewBody(),
+    objectSetBody(),
+    objectGetBody(),
+    numberFromF64Body(),
+    truthyBody(),
+    strictEqualBody(),
+    encodeFunctionBody({ locals, instructions }),
+  ]));
+
+  return moduleBytes([
+    typeSection,
+    functionSection,
+    memorySection,
+    globalSection,
+    exportSection,
+    codeSection,
+  ]);
+}
+
   const ast = parseDynamic(source);
   const propertyIds = collectPropertyNames(ast);
   const scope = new Map();
