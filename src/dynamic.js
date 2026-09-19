@@ -494,9 +494,10 @@ const RuntimeFn = Object.freeze({
   arraySetLength: 13,
   arrayPush: 14,
   arrayPop: 15,
+  arrayIndex: 16,
 });
 
-const RuntimeFunctionCount = 16;
+const RuntimeFunctionCount = 17;
 
 const emptyBlock = 0x40;
 
@@ -1393,6 +1394,63 @@ function arrayPopBody() {
   });
 }
 
+function staticArrayIndex(value) {
+  if (value === '0') return 0;
+  if (!/^[1-9]\d*$/.test(value)) return null;
+  const index = Number(value);
+  if (!Number.isSafeInteger(index) || index > 0x7fffffff) return null;
+  return index;
+}
+
+function arrayIndexBody() {
+  return encodeFunctionBody({
+    locals: [ValType.f64, ValType.i32],
+    instructions: [
+      ...localGet(0),
+      Op.f64ReinterpretI64,
+      ...localSet(1),
+
+      ...localGet(1),
+      ...localGet(1),
+      Op.f64Ne,
+      Op.if, emptyBlock,
+        ...i32Const(-1),
+        Op.return,
+      Op.end,
+
+      ...localGet(1),
+      ...f64Const(0),
+      Op.f64Lt,
+      Op.if, emptyBlock,
+        ...i32Const(-1),
+        Op.return,
+      Op.end,
+
+      ...localGet(1),
+      ...f64Const(2147483647),
+      Op.f64Gt,
+      Op.if, emptyBlock,
+        ...i32Const(-1),
+        Op.return,
+      Op.end,
+
+      ...localGet(1),
+      Op.i32TruncF64S,
+      Op.localTee, ...u32(2),
+
+      Op.f64ConvertI32U,
+      ...localGet(1),
+      Op.f64Ne,
+      Op.if, emptyBlock,
+        ...i32Const(-1),
+        Op.return,
+      Op.end,
+
+      ...localGet(2),
+    ],
+  });
+}
+
 function collectPropertyNames(program) {
   const names = new Set();
 
@@ -1405,7 +1463,11 @@ function collectPropertyNames(program) {
     }
     if (node.type === 'index') {
       visitExpression(node.object);
-      visitExpression(node.index);
+      if (node.index.type === 'string' && staticArrayIndex(node.index.value) === null) {
+        names.add(node.index.value);
+      } else {
+        visitExpression(node.index);
+      }
       return;
     }
     if (node.type === 'object') {
@@ -1478,7 +1540,7 @@ function collectStringLiterals(program) {
     }
     if (node.type === 'index') {
       visitExpression(node.object);
-      visitExpression(node.index);
+      if (node.index.type !== 'string') visitExpression(node.index);
       return;
     }
     if (node.type === 'object') {
@@ -1573,8 +1635,32 @@ function bindingIndex(scope, name) {
 function compileArrayIndex(node, scope, propertyIds, functions) {
   return [
     ...compileExpression(node, scope, propertyIds, functions),
-    Op.f64ReinterpretI64,
-    Op.i32TruncF64S,
+    ...call(RuntimeFn.arrayIndex),
+  ];
+}
+
+function compileIndexedRead(node, scope, propertyIds, functions) {
+  if (node.index.type === 'string') {
+    const numericIndex = staticArrayIndex(node.index.value);
+    if (numericIndex !== null) {
+      return [
+        ...compileExpression(node.object, scope, propertyIds, functions),
+        ...i32Const(numericIndex),
+        ...call(RuntimeFn.arrayGet),
+      ];
+    }
+
+    return [
+      ...compileExpression(node.object, scope, propertyIds, functions),
+      ...i32Const(propertyIds.get(node.index.value)),
+      ...call(RuntimeFn.objectGet),
+    ];
+  }
+
+  return [
+    ...compileExpression(node.object, scope, propertyIds, functions),
+    ...compileArrayIndex(node.index, scope, propertyIds, functions),
+    ...call(RuntimeFn.arrayGet),
   ];
 }
 
@@ -1687,11 +1773,7 @@ function compileExpression(node, scope, propertyIds, functions) {
       return instructions;
     }
     case 'index':
-      return [
-        ...compileExpression(node.object, scope, propertyIds, functions),
-        ...compileArrayIndex(node.index, scope, propertyIds, functions),
-        ...call(RuntimeFn.arrayGet),
-      ];
+      return compileIndexedRead(node, scope, propertyIds, functions);
     case 'object': {
       const instructions = [
         ...i32Const(node.properties.length),
@@ -1791,6 +1873,29 @@ function compileStatements(statements, scope, locals, propertyIds, functions, la
       }
 
       if (statement.target.type === 'index') {
+        if (statement.target.index.type === 'string') {
+          const numericIndex = staticArrayIndex(statement.target.index.value);
+
+          if (numericIndex !== null) {
+            instructions.push(
+              ...compileExpression(statement.target.object, scope, propertyIds, functions),
+              ...i32Const(numericIndex),
+              ...compileExpression(statement.value, scope, propertyIds, functions),
+              ...call(RuntimeFn.arraySet),
+              Op.drop,
+            );
+          } else {
+            instructions.push(
+              ...compileExpression(statement.target.object, scope, propertyIds, functions),
+              ...i32Const(propertyIds.get(statement.target.index.value)),
+              ...compileExpression(statement.value, scope, propertyIds, functions),
+              ...call(RuntimeFn.objectSet),
+              Op.drop,
+            );
+          }
+          continue;
+        }
+
         instructions.push(
           ...compileExpression(statement.target.object, scope, propertyIds, functions),
           ...compileArrayIndex(statement.target.index, scope, propertyIds, functions),
@@ -1954,6 +2059,7 @@ export function compileDynamic(source) {
     functionType([ValType.i64, ValType.i64], [ValType.i64]),
     functionType([ValType.i64, ValType.i64], [ValType.i64]),
     functionType([ValType.i64], [ValType.i64]),
+    functionType([ValType.i64], [ValType.i32]),
   ];
 
   const sourceTypes = program.functions.map((fn) => (
@@ -2000,6 +2106,7 @@ export function compileDynamic(source) {
     arraySetLengthBody(),
     arrayPushBody(),
     arrayPopBody(),
+    arrayIndexBody(),
     ...program.functions.map((fn) => (
       compileSourceFunction(fn, propertyIds, functions, stringLayout.pointers)
     )),
