@@ -495,9 +495,10 @@ const RuntimeFn = Object.freeze({
   arrayPush: 14,
   arrayPop: 15,
   arrayIndex: 16,
+  arrayAt: 17,
 });
 
-const RuntimeFunctionCount = 17;
+const RuntimeFunctionCount = 18;
 
 const emptyBlock = 0x40;
 
@@ -1451,6 +1452,80 @@ function arrayIndexBody() {
   });
 }
 
+function arrayAtBody() {
+  return encodeFunctionBody({
+    locals: [ValType.f64, ValType.i32, ValType.i32],
+    instructions: [
+      ...localGet(1),
+      Op.f64ReinterpretI64,
+      ...localSet(2),
+
+      ...localGet(2),
+      ...localGet(2),
+      Op.f64Ne,
+      Op.if, emptyBlock,
+        ...i32Const(0),
+        ...localSet(3),
+      Op.else,
+        ...localGet(2),
+        ...f64Const(2147483647),
+        Op.f64Gt,
+        Op.if, emptyBlock,
+          ...i64Const(JSValue.UNDEFINED),
+          Op.return,
+        Op.end,
+
+        ...localGet(2),
+        ...f64Const(-2147483648),
+        Op.f64Lt,
+        Op.if, emptyBlock,
+          ...i64Const(JSValue.UNDEFINED),
+          Op.return,
+        Op.end,
+
+        ...localGet(2),
+        Op.i32TruncF64S,
+        ...localSet(3),
+      Op.end,
+
+      ...localGet(0),
+      Op.i32WrapI64,
+      Op.i32Load, ...memarg(2, 4),
+      ...localSet(4),
+
+      ...localGet(3),
+      ...i32Const(0),
+      Op.i32LtS,
+      Op.if, emptyBlock,
+        ...localGet(3),
+        ...localGet(4),
+        Op.i32Add,
+        ...localSet(3),
+      Op.end,
+
+      ...localGet(3),
+      ...i32Const(0),
+      Op.i32LtS,
+      Op.if, emptyBlock,
+        ...i64Const(JSValue.UNDEFINED),
+        Op.return,
+      Op.end,
+
+      ...localGet(3),
+      ...localGet(4),
+      Op.i32GeU,
+      Op.if, emptyBlock,
+        ...i64Const(JSValue.UNDEFINED),
+        Op.return,
+      Op.end,
+
+      ...localGet(0),
+      ...localGet(3),
+      ...call(RuntimeFn.arrayGet),
+    ],
+  });
+}
+
 function collectPropertyNames(program) {
   const names = new Set();
 
@@ -1795,6 +1870,17 @@ function compileExpression(node, scope, propertyIds, functions) {
         ...call(RuntimeFn.objectGet),
       ];
     case 'call': {
+      if (node.callee.type === 'member' && node.callee.property === 'at') {
+        if (node.args.length !== 1) {
+          throw new TypeError('Array.at expects exactly one argument');
+        }
+        return [
+          ...compileExpression(node.callee.object, scope, propertyIds, functions),
+          ...compileExpression(node.args[0], scope, propertyIds, functions),
+          ...call(RuntimeFn.arrayAt),
+        ];
+      }
+
       if (node.callee.type === 'member' && node.callee.property === 'push') {
         if (node.args.length !== 1) {
           throw new TypeError('Array.push expects exactly one argument');
@@ -1817,7 +1903,7 @@ function compileExpression(node, scope, propertyIds, functions) {
       }
 
       if (node.callee.type !== 'id') {
-        throw new SyntaxError('Only direct function calls and array push/pop are supported');
+        throw new SyntaxError('Only direct function calls and supported array methods are allowed');
       }
       if (scope.has(node.callee.name)) {
         throw new SyntaxError('Calling local values is not supported: ' + node.callee.name);
@@ -2060,6 +2146,7 @@ export function compileDynamic(source) {
     functionType([ValType.i64, ValType.i64], [ValType.i64]),
     functionType([ValType.i64], [ValType.i64]),
     functionType([ValType.i64], [ValType.i32]),
+    functionType([ValType.i64, ValType.i64], [ValType.i64]),
   ];
 
   const sourceTypes = program.functions.map((fn) => (
@@ -2107,6 +2194,7 @@ export function compileDynamic(source) {
     arrayPushBody(),
     arrayPopBody(),
     arrayIndexBody(),
+    arrayAtBody(),
     ...program.functions.map((fn) => (
       compileSourceFunction(fn, propertyIds, functions, stringLayout.pointers)
     )),
