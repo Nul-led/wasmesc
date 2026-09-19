@@ -1540,9 +1540,7 @@ function collectStringLiterals(program) {
     }
     if (node.type === 'index') {
       visitExpression(node.object);
-      if (node.index.type !== 'string' || staticArrayIndex(node.index.value) !== null) {
-        visitExpression(node.index);
-      }
+      if (node.index.type !== 'string') visitExpression(node.index);
       return;
     }
     if (node.type === 'object') {
