@@ -16,7 +16,7 @@ import { JSValue, numberToBits } from './jsvalue.js';
 const KEYWORDS = new Set([
   'export', 'function', 'return', 'let', 'const',
   'true', 'false', 'null', 'undefined',
-  'if', 'else', 'while',
+  'if', 'else', 'while', 'break', 'continue',
 ]);
 
 const MULTI_CHAR_TOKENS = ['===', '!==', '<=', '>='];
@@ -168,6 +168,16 @@ class Parser {
       this.take(')');
       const body = this.parseBlock();
       return { type: 'while', test, body };
+    }
+
+    if (this.maybe('break')) {
+      this.maybe(';');
+      return { type: 'break' };
+    }
+
+    if (this.maybe('continue')) {
+      this.maybe(';');
+      return { type: 'continue' };
     }
 
     if (this.peek('id')) {
@@ -727,7 +737,13 @@ function compileExpression(node, scope, propertyIds) {
   }
 }
 
-function compileStatements(statements, scope, locals, propertyIds) {
+function branchDepth(labels, kind) {
+  const depth = labels.findIndex((label) => label === kind);
+  if (depth === -1) throw new SyntaxError(kind + ' used outside of a loop');
+  return depth;
+}
+
+function compileStatements(statements, scope, locals, propertyIds, labels = []) {
   const instructions = [];
 
   for (const statement of statements) {
@@ -774,12 +790,24 @@ function compileStatements(statements, scope, locals, propertyIds) {
         ...compileExpression(statement.test, scope, propertyIds),
         ...call(RuntimeFn.truthy),
         Op.if, emptyBlock,
-        ...compileStatements(statement.consequent, childScope(scope), locals, propertyIds),
+        ...compileStatements(
+          statement.consequent,
+          childScope(scope),
+          locals,
+          propertyIds,
+          ['if', ...labels],
+        ),
       );
       if (statement.alternate) {
         instructions.push(
           Op.else,
-          ...compileStatements(statement.alternate, childScope(scope), locals, propertyIds),
+          ...compileStatements(
+            statement.alternate,
+            childScope(scope),
+            locals,
+            propertyIds,
+            ['if', ...labels],
+          ),
         );
       }
       instructions.push(Op.end);
@@ -794,11 +822,27 @@ function compileStatements(statements, scope, locals, propertyIds) {
             ...call(RuntimeFn.truthy),
             Op.i32Eqz,
             Op.brIf, ...u32(1),
-            ...compileStatements(statement.body, childScope(scope), locals, propertyIds),
+            ...compileStatements(
+              statement.body,
+              childScope(scope),
+              locals,
+              propertyIds,
+              ['continue', 'break', ...labels],
+            ),
             Op.br, ...u32(0),
           Op.end,
         Op.end,
       );
+      continue;
+    }
+
+    if (statement.type === 'break') {
+      instructions.push(Op.br, ...u32(branchDepth(labels, 'break')));
+      continue;
+    }
+
+    if (statement.type === 'continue') {
+      instructions.push(Op.br, ...u32(branchDepth(labels, 'continue')));
       continue;
     }
 
