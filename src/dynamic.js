@@ -21,6 +21,91 @@ const KEYWORDS = new Set([
 
 const MULTI_CHAR_TOKENS = ['===', '!==', '<=', '>='];
 
+function readHexEscape(source, start, length) {
+  const text = source.slice(start, start + length);
+  if (text.length !== length || !/^[0-9A-Fa-f]+$/.test(text)) {
+    throw new SyntaxError('Invalid hexadecimal string escape at ' + start);
+  }
+  return { value: Number.parseInt(text, 16), end: start + length };
+}
+
+function readStringLiteral(source, start) {
+  const quote = source[start];
+  let i = start + 1;
+  let value = '';
+
+  while (i < source.length) {
+    const ch = source[i++];
+
+    if (ch === quote) return { value, end: i };
+    if (ch === '\n' || ch === '\r') {
+      throw new SyntaxError('Unterminated string literal at ' + start);
+    }
+    if (ch !== '\\') {
+      value += ch;
+      continue;
+    }
+
+    if (i >= source.length) throw new SyntaxError('Unterminated string literal at ' + start);
+    const escape = source[i++];
+
+    const simple = {
+      n: '\n',
+      r: '\r',
+      t: '\t',
+      b: '\b',
+      f: '\f',
+      v: '\v',
+      0: '\0',
+      '\\': '\\',
+      "'": "'",
+      '"': '"',
+    };
+    if (Object.hasOwn(simple, escape)) {
+      value += simple[escape];
+      continue;
+    }
+
+    if (escape === 'x') {
+      const decoded = readHexEscape(source, i, 2);
+      value += String.fromCharCode(decoded.value);
+      i = decoded.end;
+      continue;
+    }
+
+    if (escape === 'u') {
+      if (source[i] === '{') {
+        const close = source.indexOf('}', i + 1);
+        if (close === -1) throw new SyntaxError('Unterminated Unicode escape at ' + start);
+        const hex = source.slice(i + 1, close);
+        if (!/^[0-9A-Fa-f]{1,6}$/.test(hex)) {
+          throw new SyntaxError('Invalid Unicode escape at ' + i);
+        }
+        const codePoint = Number.parseInt(hex, 16);
+        if (codePoint > 0x10ffff) throw new SyntaxError('Unicode code point out of range');
+        value += String.fromCodePoint(codePoint);
+        i = close + 1;
+        continue;
+      }
+
+      const decoded = readHexEscape(source, i, 4);
+      value += String.fromCharCode(decoded.value);
+      i = decoded.end;
+      continue;
+    }
+
+    if (escape === '\n') continue;
+    if (escape === '\r') {
+      if (source[i] === '\n') i += 1;
+      continue;
+    }
+
+    value += escape;
+  }
+
+  throw new SyntaxError('Unterminated string literal at ' + start);
+}
+
 function tokenize(source) {
   const tokens = [];
   let i = 0;
@@ -44,6 +129,13 @@ function tokenize(source) {
       while (i < source.length && /[A-Za-z0-9_$]/.test(source[i])) i += 1;
       const value = source.slice(start, i);
       tokens.push({ type: KEYWORDS.has(value) ? value : 'id', value, pos: start });
+      continue;
+    }
+
+    if (ch === '"' || ch === "'") {
+      const string = readStringLiteral(source, i);
+      tokens.push({ type: 'string', value: string.value, pos: i });
+      i = string.end;
       continue;
     }
 
@@ -279,6 +371,7 @@ class Parser {
 
   parsePrimary() {
     if (this.peek('number')) return { type: 'number', value: this.take('number').value };
+    if (this.peek('string')) return { type: 'string', value: this.take('string').value };
     if (this.maybe('true')) return { type: 'literal', value: true };
     if (this.maybe('false')) return { type: 'literal', value: false };
     if (this.maybe('null')) return { type: 'literal', value: null };
@@ -345,6 +438,7 @@ const Op = Object.freeze({
   i32Sub: 0x6b,
   i32Mul: 0x6c,
   i32And: 0x71,
+  i64And: 0x83,
   i64Or: 0x84,
   f64Neg: 0x9a,
   f64Add: 0xa0,
@@ -573,6 +667,20 @@ function truthyBody() {
 
   instructions.push(
     ...localGet(0),
+    ...i64Const(JSValue.TAG_MASK),
+    Op.i64And,
+    ...i64Const(JSValue.STRING),
+    Op.i64Eq,
+    Op.if, emptyBlock,
+      ...localGet(0),
+      Op.i32WrapI64,
+      Op.i32Load, ...memarg(2, 0),
+      Op.i32Eqz,
+      Op.i32Eqz,
+      Op.return,
+    Op.end,
+
+    ...localGet(0),
     Op.f64ReinterpretI64,
     ...f64Const(0),
     Op.f64Ne,
@@ -626,6 +734,7 @@ function collectPropertyNames(program) {
 
   function visitExpression(node) {
     if (!node || typeof node !== 'object') return;
+    if (node.type === 'string') return;
     if (node.type === 'object') {
       for (const property of node.properties) {
         names.add(property.key);
@@ -673,6 +782,98 @@ function collectPropertyNames(program) {
   return new Map([...names].map((name, index) => [name, index + 1]));
 }
 
+function collectStringLiterals(program) {
+  const values = new Set();
+
+  function visitExpression(node) {
+    if (!node || typeof node !== 'object') return;
+    if (node.type === 'string') {
+      values.add(node.value);
+      return;
+    }
+    if (node.type === 'object') {
+      node.properties.forEach((property) => visitExpression(property.value));
+      return;
+    }
+    if (node.type === 'member') {
+      visitExpression(node.object);
+      return;
+    }
+    if (node.type === 'call') {
+      visitExpression(node.callee);
+      node.args.forEach(visitExpression);
+      return;
+    }
+    if (node.type === 'binary') {
+      visitExpression(node.left);
+      visitExpression(node.right);
+      return;
+    }
+    if (node.type === 'unary') visitExpression(node.value);
+  }
+
+  function visitStatement(statement) {
+    if (statement.type === 'var') visitExpression(statement.init);
+    else if (statement.type === 'assign') {
+      visitExpression(statement.target);
+      visitExpression(statement.value);
+    }
+    else if (statement.type === 'return') visitExpression(statement.value);
+    else if (statement.type === 'expression') visitExpression(statement.expression);
+    else if (statement.type === 'if') {
+      visitExpression(statement.test);
+      statement.consequent.forEach(visitStatement);
+      statement.alternate?.forEach(visitStatement);
+    } else if (statement.type === 'while') {
+      visitExpression(statement.test);
+      statement.body.forEach(visitStatement);
+    }
+  }
+
+  for (const fn of program.functions) fn.statements.forEach(visitStatement);
+  return [...values];
+}
+
+function align(value, alignment = 8) {
+  return Math.ceil(value / alignment) * alignment;
+}
+
+function stringData(value) {
+  const bytes = [
+    value.length & 0xff,
+    (value.length >>> 8) & 0xff,
+    (value.length >>> 16) & 0xff,
+    (value.length >>> 24) & 0xff,
+  ];
+
+  for (let i = 0; i < value.length; i += 1) {
+    const unit = value.charCodeAt(i);
+    bytes.push(unit & 0xff, unit >>> 8);
+  }
+
+  return bytes;
+}
+
+function layoutStringLiterals(program, start = 1024) {
+  const pointers = new Map();
+  const segments = [];
+  let cursor = start;
+
+  for (const value of collectStringLiterals(program)) {
+    cursor = align(cursor);
+    const bytes = stringData(value);
+    pointers.set(value, cursor);
+    segments.push({ offset: cursor, bytes });
+    cursor += bytes.length;
+  }
+
+  return {
+    pointers,
+    segments,
+    heapStart: align(cursor),
+  };
+}
+
 function bindingIndex(scope, name) {
   const binding = scope.get(name);
   if (!binding) throw new ReferenceError('Unknown identifier: ' + name);
@@ -683,6 +884,15 @@ function compileExpression(node, scope, propertyIds, functions) {
   switch (node.type) {
     case 'number':
       return i64Const(numberToBits(node.value));
+    case 'string': {
+      const pointer = scope.stringLiterals.get(node.value);
+      if (pointer === undefined) throw new Error('String literal was not interned');
+      return [
+        ...i64Const(JSValue.STRING),
+        ...i64Const(BigInt(pointer)),
+        Op.i64Or,
+      ];
+    }
     case 'literal': {
       const bits = node.value === undefined ? JSValue.UNDEFINED
         : node.value === null ? JSValue.NULL
@@ -929,6 +1139,7 @@ function compileStatements(statements, scope, locals, propertyIds, functions, la
 function childScope(parent) {
   const scope = new Map(parent);
   scope.paramCount = parent.paramCount;
+  scope.stringLiterals = parent.stringLiterals;
   return scope;
 }
 
@@ -936,9 +1147,10 @@ export function parseDynamic(source) {
   return new Parser(source).parseProgram();
 }
 
-function compileSourceFunction(fn, propertyIds, functions) {
+function compileSourceFunction(fn, propertyIds, functions, stringLiterals) {
   const scope = new Map();
   scope.paramCount = fn.params.length;
+  scope.stringLiterals = stringLiterals;
   fn.params.forEach((name, index) => scope.set(name, { index, kind: 'param' }));
 
   const locals = [];
@@ -956,6 +1168,7 @@ function compileSourceFunction(fn, propertyIds, functions) {
 export function compileDynamic(source) {
   const program = parseDynamic(source);
   const propertyIds = collectPropertyNames(program);
+  const stringLayout = layoutStringLiterals(program);
 
   const functions = new Map();
   program.functions.forEach((fn, index) => {
@@ -986,10 +1199,11 @@ export function compileDynamic(source) {
     ...runtimeTypes.map((_, index) => [...u32(index)]),
     ...program.functions.map((_, index) => [...u32(RuntimeFunctionCount + index)]),
   ]));
-  const memorySection = section(5, vec([[0x00, ...u32(1)]]));
+  const memoryPages = Math.max(1, Math.ceil((stringLayout.heapStart + 65536) / 65536));
+  const memorySection = section(5, vec([[0x00, ...u32(memoryPages)]]));
   const globalSection = section(6, vec([[
     ValType.i32, 0x01,
-    Op.i32Const, ...s32(1024), Op.end,
+    Op.i32Const, ...s32(stringLayout.heapStart), Op.end,
   ]]));
 
   const exports = program.functions
@@ -1010,8 +1224,19 @@ export function compileDynamic(source) {
     numberFromF64Body(),
     truthyBody(),
     strictEqualBody(),
-    ...program.functions.map((fn) => compileSourceFunction(fn, propertyIds, functions)),
+    ...program.functions.map((fn) => (
+      compileSourceFunction(fn, propertyIds, functions, stringLayout.pointers)
+    )),
   ]));
+
+  const dataSection = stringLayout.segments.length === 0 ? null : section(11, vec(
+    stringLayout.segments.map(({ offset, bytes }) => [
+      0x00,
+      Op.i32Const, ...s32(offset), Op.end,
+      ...u32(bytes.length),
+      ...bytes,
+    ]),
+  ));
 
   return moduleBytes([
     typeSection,
@@ -1020,6 +1245,7 @@ export function compileDynamic(source) {
     globalSection,
     exportSection,
     codeSection,
+    ...(dataSection ? [dataSection] : []),
   ]);
 }
 
