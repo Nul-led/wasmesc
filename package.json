@@ -1,0 +1,15 @@
+{
+  "name": "wasmesc",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A dependency-free proof of concept for executing JavaScript from Wasm instantiated with {}.",
+  "type": "module",
+  "exports": "./src/compiler.mjs",
+  "bin": { "wasmesc": "./bin/wasmesc.mjs" },
+  "scripts": {
+    "test": "node --test",
+    "demo": "node bin/wasmesc.mjs compile examples/hello.body.js -o dist/hello.wasm --wat dist/hello.wat && node bin/wasmesc.mjs run dist/hello.wasm",
+    "probe": "node bin/wasmesc.mjs probe"
+  },
+  "engines": { "node": ">=22" }
+}
