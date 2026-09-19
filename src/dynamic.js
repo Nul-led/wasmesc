@@ -1680,7 +1680,10 @@ function arrayUnshiftBody() {
             Op.i32Add,
             ...i32Const(-2147483648),
             Op.i32Xor,
+            ...localSet(6),
+
             ...localGet(4),
+            ...localGet(6),
             Op.i32Store, ...memarg(2, 4),
           Op.end,
 
