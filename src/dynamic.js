@@ -212,8 +212,9 @@ class Parser {
       this.i = start;
     }
 
-    const token = this.tokens[this.i];
-    throw new SyntaxError('Unsupported statement at ' + token.pos);
+    const expression = this.parseExpression();
+    this.maybe(';');
+    return { type: 'expression', expression };
   }
 
   parseExpression(minPrecedence = 0) {
@@ -657,6 +658,7 @@ function collectPropertyNames(program) {
       visitExpression(statement.value);
     }
     else if (statement.type === 'return') visitExpression(statement.value);
+    else if (statement.type === 'expression') visitExpression(statement.expression);
     else if (statement.type === 'if') {
       visitExpression(statement.test);
       statement.consequent.forEach(visitStatement);
@@ -845,6 +847,12 @@ function compileStatements(statements, scope, locals, propertyIds, functions, la
     if (statement.type === 'return') {
       instructions.push(...compileExpression(statement.value, scope, propertyIds, functions));
       instructions.push(Op.return);
+      continue;
+    }
+
+    if (statement.type === 'expression') {
+      instructions.push(...compileExpression(statement.expression, scope, propertyIds, functions));
+      instructions.push(Op.drop);
       continue;
     }
 
