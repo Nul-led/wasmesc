@@ -170,12 +170,18 @@ class Parser {
       return { type: 'while', test, body };
     }
 
-    if (this.peek('id') && this.peekNext('=')) {
-      const name = this.take('id').value;
-      this.take('=');
-      const value = this.parseExpression();
-      this.maybe(';');
-      return { type: 'assign', name, value };
+    if (this.peek('id')) {
+      const start = this.i;
+      const target = this.parseExpression();
+      if (this.maybe('=')) {
+        if (target.type !== 'id' && target.type !== 'member') {
+          throw new SyntaxError('Invalid assignment target');
+        }
+        const value = this.parseExpression();
+        this.maybe(';');
+        return { type: 'assign', target, value };
+      }
+      this.i = start;
     }
 
     const token = this.tokens[this.i];
@@ -265,6 +271,7 @@ const Op = Object.freeze({
   brIf: 0x0d,
   return: 0x0f,
   call: 0x10,
+  drop: 0x1a,
   localGet: 0x20,
   localSet: 0x21,
   localTee: 0x22,
@@ -370,21 +377,21 @@ function allocBody() {
 
 function objectNewBody() {
   // Object layout:
-  // +0 capacity:i32, +4 used:i32,
-  // then 16-byte entries { keyId:i32, padding:i32, value:i64 }.
+  // +0 head entry pointer:i32, +4 property-write count:i32.
+  // Each property write allocates a 16-byte linked entry:
+  // +0 next:i32, +4 keyId:i32, +8 value:i64.
+  //
+  // The capacity argument is retained in the runtime ABI for now, but the
+  // linked representation does not require pre-sizing.
   return encodeFunctionBody({
     locals: [ValType.i32],
     instructions: [
       ...i32Const(8),
-      ...localGet(0),
-      ...i32Const(16),
-      Op.i32Mul,
-      Op.i32Add,
       ...call(RuntimeFn.alloc),
       ...localSet(1),
 
       ...localGet(1),
-      ...localGet(0),
+      ...i32Const(0),
       Op.i32Store, ...memarg(2, 0),
 
       ...localGet(1),
@@ -401,34 +408,39 @@ function objectNewBody() {
 
 function objectSetBody() {
   // (object:i64, keyId:i32, value:i64) -> object:i64
+  // Property writes prepend an entry, so reads naturally implement
+  // last-write-wins semantics without fixed object capacity.
   return encodeFunctionBody({
-    locals: [ValType.i32, ValType.i32, ValType.i32],
+    locals: [ValType.i32, ValType.i32],
     instructions: [
       ...localGet(0),
       Op.i32WrapI64,
       ...localSet(3),
 
-      ...localGet(3),
-      Op.i32Load, ...memarg(2, 4),
+      ...i32Const(16),
+      ...call(RuntimeFn.alloc),
       ...localSet(4),
 
-      ...localGet(3),
-      ...i32Const(8),
-      Op.i32Add,
       ...localGet(4),
-      ...i32Const(16),
-      Op.i32Mul,
-      Op.i32Add,
-      Op.localTee, ...u32(5),
-      ...localGet(1),
+      ...localGet(3),
+      Op.i32Load, ...memarg(2, 0),
       Op.i32Store, ...memarg(2, 0),
 
-      ...localGet(5),
+      ...localGet(4),
+      ...localGet(1),
+      Op.i32Store, ...memarg(2, 4),
+
+      ...localGet(4),
       ...localGet(2),
       Op.i64Store, ...memarg(3, 8),
 
       ...localGet(3),
       ...localGet(4),
+      Op.i32Store, ...memarg(2, 0),
+
+      ...localGet(3),
+      ...localGet(3),
+      Op.i32Load, ...memarg(2, 4),
       ...i32Const(1),
       Op.i32Add,
       Op.i32Store, ...memarg(2, 4),
@@ -439,16 +451,15 @@ function objectSetBody() {
 }
 
 function objectGetBody() {
-  // Search newest-to-oldest, matching JS object-literal last-write-wins behavior.
   return encodeFunctionBody({
-    locals: [ValType.i32, ValType.i32, ValType.i32],
+    locals: [ValType.i32, ValType.i32],
     instructions: [
       ...localGet(0),
       Op.i32WrapI64,
       ...localSet(2),
 
       ...localGet(2),
-      Op.i32Load, ...memarg(2, 4),
+      Op.i32Load, ...memarg(2, 0),
       ...localSet(3),
 
       Op.block, emptyBlock,
@@ -458,28 +469,18 @@ function objectGetBody() {
           Op.brIf, ...u32(1),
 
           ...localGet(3),
-          ...i32Const(1),
-          Op.i32Sub,
-          Op.localTee, ...u32(3),
-
-          ...localGet(2),
-          ...i32Const(8),
-          Op.i32Add,
-          ...localGet(3),
-          ...i32Const(16),
-          Op.i32Mul,
-          Op.i32Add,
-          Op.localTee, ...u32(4),
-
-          Op.i32Load, ...memarg(2, 0),
+          Op.i32Load, ...memarg(2, 4),
           ...localGet(1),
           Op.i32Eq,
           Op.if, emptyBlock,
-            ...localGet(4),
+            ...localGet(3),
             Op.i64Load, ...memarg(3, 8),
             Op.return,
           Op.end,
 
+          ...localGet(3),
+          Op.i32Load, ...memarg(2, 0),
+          ...localSet(3),
           Op.br, ...u32(0),
         Op.end,
       Op.end,
@@ -598,7 +599,10 @@ function collectPropertyNames(ast) {
 
   function visitStatement(statement) {
     if (statement.type === 'var') visitExpression(statement.init);
-    else if (statement.type === 'assign') visitExpression(statement.value);
+    else if (statement.type === 'assign') {
+      visitExpression(statement.target);
+      visitExpression(statement.value);
+    }
     else if (statement.type === 'return') visitExpression(statement.value);
     else if (statement.type === 'if') {
       visitExpression(statement.test);
@@ -738,11 +742,24 @@ function compileStatements(statements, scope, locals, propertyIds) {
     }
 
     if (statement.type === 'assign') {
-      const binding = scope.get(statement.name);
-      if (!binding) throw new ReferenceError('Unknown identifier: ' + statement.name);
-      if (binding.kind === 'const') throw new TypeError('Assignment to constant variable: ' + statement.name);
-      instructions.push(...compileExpression(statement.value, scope, propertyIds));
-      instructions.push(...localSet(binding.index));
+      if (statement.target.type === 'id') {
+        const binding = scope.get(statement.target.name);
+        if (!binding) throw new ReferenceError('Unknown identifier: ' + statement.target.name);
+        if (binding.kind === 'const') {
+          throw new TypeError('Assignment to constant variable: ' + statement.target.name);
+        }
+        instructions.push(...compileExpression(statement.value, scope, propertyIds));
+        instructions.push(...localSet(binding.index));
+        continue;
+      }
+
+      instructions.push(
+        ...compileExpression(statement.target.object, scope, propertyIds),
+        ...i32Const(propertyIds.get(statement.target.property)),
+        ...compileExpression(statement.value, scope, propertyIds),
+        ...call(RuntimeFn.objectSet),
+        Op.drop,
+      );
       continue;
     }
 
