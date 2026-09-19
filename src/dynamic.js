@@ -492,9 +492,11 @@ const RuntimeFn = Object.freeze({
   stringConcat: 11,
   add: 12,
   arraySetLength: 13,
+  arrayPush: 14,
+  arrayPop: 15,
 });
 
-const RuntimeFunctionCount = 14;
+const RuntimeFunctionCount = 16;
 
 const emptyBlock = 0x40;
 
@@ -1328,6 +1330,69 @@ function arraySetLengthBody() {
   });
 }
 
+function arrayPushBody() {
+  return encodeFunctionBody({
+    locals: [ValType.i32],
+    instructions: [
+      ...localGet(0),
+      Op.i32WrapI64,
+      Op.i32Load, ...memarg(2, 4),
+      ...localSet(2),
+
+      ...localGet(0),
+      ...localGet(2),
+      ...localGet(1),
+      ...call(RuntimeFn.arraySet),
+      Op.drop,
+
+      ...localGet(2),
+      ...i32Const(1),
+      Op.i32Add,
+      Op.f64ConvertI32U,
+      ...call(RuntimeFn.numberFromF64),
+    ],
+  });
+}
+
+function arrayPopBody() {
+  return encodeFunctionBody({
+    locals: [ValType.i32, ValType.i32, ValType.i64],
+    instructions: [
+      ...localGet(0),
+      Op.i32WrapI64,
+      ...localSet(1),
+
+      ...localGet(1),
+      Op.i32Load, ...memarg(2, 4),
+      Op.i32Eqz,
+      Op.if, emptyBlock,
+        ...i64Const(JSValue.UNDEFINED),
+        Op.return,
+      Op.end,
+
+      ...localGet(1),
+      Op.i32Load, ...memarg(2, 4),
+      ...i32Const(1),
+      Op.i32Sub,
+      ...localSet(2),
+
+      ...localGet(0),
+      ...localGet(2),
+      ...call(RuntimeFn.arrayGet),
+      ...localSet(3),
+
+      ...localGet(0),
+      ...localGet(2),
+      Op.f64ConvertI32U,
+      ...call(RuntimeFn.numberFromF64),
+      ...call(RuntimeFn.arraySetLength),
+      Op.drop,
+
+      ...localGet(3),
+    ],
+  });
+}
+
 function collectPropertyNames(program) {
   const names = new Set();
 
@@ -1648,8 +1713,29 @@ function compileExpression(node, scope, propertyIds, functions) {
         ...call(RuntimeFn.objectGet),
       ];
     case 'call': {
+      if (node.callee.type === 'member' && node.callee.property === 'push') {
+        if (node.args.length !== 1) {
+          throw new TypeError('Array.push expects exactly one argument');
+        }
+        return [
+          ...compileExpression(node.callee.object, scope, propertyIds, functions),
+          ...compileExpression(node.args[0], scope, propertyIds, functions),
+          ...call(RuntimeFn.arrayPush),
+        ];
+      }
+
+      if (node.callee.type === 'member' && node.callee.property === 'pop') {
+        if (node.args.length !== 0) {
+          throw new TypeError('Array.pop expects no arguments');
+        }
+        return [
+          ...compileExpression(node.callee.object, scope, propertyIds, functions),
+          ...call(RuntimeFn.arrayPop),
+        ];
+      }
+
       if (node.callee.type !== 'id') {
-        throw new SyntaxError('Only direct function calls are supported');
+        throw new SyntaxError('Only direct function calls and array push/pop are supported');
       }
       if (scope.has(node.callee.name)) {
         throw new SyntaxError('Calling local values is not supported: ' + node.callee.name);
@@ -1866,6 +1952,8 @@ export function compileDynamic(source) {
     functionType([ValType.i64, ValType.i64], [ValType.i64]),
     functionType([ValType.i64, ValType.i64], [ValType.i64]),
     functionType([ValType.i64, ValType.i64], [ValType.i64]),
+    functionType([ValType.i64, ValType.i64], [ValType.i64]),
+    functionType([ValType.i64], [ValType.i64]),
   ];
 
   const sourceTypes = program.functions.map((fn) => (
@@ -1910,6 +1998,8 @@ export function compileDynamic(source) {
     stringConcatBody(),
     addBody(),
     arraySetLengthBody(),
+    arrayPushBody(),
+    arrayPopBody(),
     ...program.functions.map((fn) => (
       compileSourceFunction(fn, propertyIds, functions, stringLayout.pointers)
     )),
