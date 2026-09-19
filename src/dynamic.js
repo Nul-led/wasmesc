@@ -1408,7 +1408,7 @@ function arrayIndexBody() {
     instructions: [
       ...localGet(0),
       Op.f64ReinterpretI64,
-      Op.localTee, ...u32(1),
+      ...localSet(1),
 
       ...localGet(1),
       ...localGet(1),
