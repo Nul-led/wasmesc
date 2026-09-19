@@ -17,20 +17,4 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - name: Run npm test
-        run: |
-          set +e
-          npm test > test-output.txt 2>&1
-          code=$?
-          echo "$code" > test-exit-code.txt
-          exit 0
-      - name: Upload test output
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: test-output
-          path: |
-            test-output.txt
-            test-exit-code.txt
-      - name: Enforce test result
-        run: exit "$(cat test-exit-code.txt)"
+      - run: npm test
