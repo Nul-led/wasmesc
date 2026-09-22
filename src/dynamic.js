@@ -16,10 +16,11 @@ import { JSValue, numberToBits } from './jsvalue.js';
 const KEYWORDS = new Set([
   'export', 'function', 'return', 'let', 'const',
   'true', 'false', 'null', 'undefined',
-  'if', 'else', 'while', 'break', 'continue', 'delete',
+  'if', 'else', 'while', 'break', 'continue', 'delete', 'typeof',
 ]);
 
 const MULTI_CHAR_TOKENS = ['===', '!==', '<=', '>=', '&&', '||'];
+const TYPEOF_STRINGS = ['undefined', 'boolean', 'number', 'string', 'object'];
 
 function readHexEscape(source, start, length) {
   const text = source.slice(start, start + length);
@@ -347,6 +348,7 @@ class Parser {
 
   parseUnary() {
     if (this.maybe('delete')) return { type: 'unary', op: 'delete', value: this.parseUnary() };
+    if (this.maybe('typeof')) return { type: 'unary', op: 'typeof', value: this.parseUnary() };
     if (this.maybe('-')) return { type: 'unary', op: '-', value: this.parseUnary() };
     if (this.maybe('+')) return { type: 'unary', op: '+', value: this.parseUnary() };
     if (this.maybe('!')) return { type: 'unary', op: '!', value: this.parseUnary() };
@@ -525,9 +527,10 @@ const RuntimeFn = Object.freeze({
   arrayWith: 32,
   arrayToReversed: 33,
   arrayToSpliced: 34,
+  typeOf: 35,
 });
 
-const RuntimeFunctionCount = 35;
+const RuntimeFunctionCount = 36;
 
 const emptyBlock = 0x40;
 
@@ -3140,6 +3143,76 @@ function arrayToSplicedBody() {
   });
 }
 
+function typeOfBody() {
+  return encodeFunctionBody({
+    instructions: [
+      ...localGet(0),
+      ...i64Const(JSValue.UNDEFINED),
+      Op.i64Eq,
+      Op.if, emptyBlock,
+        ...localGet(1),
+        Op.return,
+      Op.end,
+
+      ...localGet(0),
+      ...i64Const(JSValue.TRUE),
+      Op.i64Eq,
+      Op.if, emptyBlock,
+        ...localGet(2),
+        Op.return,
+      Op.end,
+
+      ...localGet(0),
+      ...i64Const(JSValue.FALSE),
+      Op.i64Eq,
+      Op.if, emptyBlock,
+        ...localGet(2),
+        Op.return,
+      Op.end,
+
+      ...localGet(0),
+      ...i64Const(JSValue.NULL),
+      Op.i64Eq,
+      Op.if, emptyBlock,
+        ...localGet(5),
+        Op.return,
+      Op.end,
+
+      ...localGet(0),
+      ...i64Const(JSValue.TAG_MASK),
+      Op.i64And,
+      ...i64Const(JSValue.STRING),
+      Op.i64Eq,
+      Op.if, emptyBlock,
+        ...localGet(4),
+        Op.return,
+      Op.end,
+
+      ...localGet(0),
+      ...i64Const(JSValue.TAG_MASK),
+      Op.i64And,
+      ...i64Const(JSValue.OBJECT),
+      Op.i64Eq,
+      Op.if, emptyBlock,
+        ...localGet(5),
+        Op.return,
+      Op.end,
+
+      ...localGet(0),
+      ...i64Const(JSValue.TAG_MASK),
+      Op.i64And,
+      ...i64Const(JSValue.ARRAY),
+      Op.i64Eq,
+      Op.if, emptyBlock,
+        ...localGet(5),
+        Op.return,
+      Op.end,
+
+      ...localGet(3),
+    ],
+  });
+}
+
 function collectPropertyNames(program) {
   const names = new Set();
 
@@ -3262,7 +3335,10 @@ function collectStringLiterals(program) {
       visitExpression(node.right);
       return;
     }
-    if (node.type === 'unary') visitExpression(node.value);
+    if (node.type === 'unary') {
+      if (node.op === 'typeof') TYPEOF_STRINGS.forEach((value) => values.add(value));
+      visitExpression(node.value);
+    }
   }
 
   function visitStatement(statement) {
@@ -3333,6 +3409,16 @@ function bindingIndex(scope, name) {
   return binding.index;
 }
 
+function compileStringLiteral(value, scope) {
+  const pointer = scope.stringLiterals.get(value);
+  if (pointer === undefined) throw new Error('String literal was not interned');
+  return [
+    ...i64Const(JSValue.STRING),
+    ...i64Const(BigInt(pointer)),
+    Op.i64Or,
+  ];
+}
+
 function compileArrayIndex(node, scope, propertyIds, functions) {
   return [
     ...compileExpression(node, scope, propertyIds, functions),
@@ -3369,15 +3455,8 @@ function compileExpression(node, scope, propertyIds, functions) {
   switch (node.type) {
     case 'number':
       return i64Const(numberToBits(node.value));
-    case 'string': {
-      const pointer = scope.stringLiterals.get(node.value);
-      if (pointer === undefined) throw new Error('String literal was not interned');
-      return [
-        ...i64Const(JSValue.STRING),
-        ...i64Const(BigInt(pointer)),
-        Op.i64Or,
-      ];
-    }
+    case 'string':
+      return compileStringLiteral(node.value, scope);
     case 'literal': {
       const bits = node.value === undefined ? JSValue.UNDEFINED
         : node.value === null ? JSValue.NULL
@@ -3440,6 +3519,14 @@ function compileExpression(node, scope, propertyIds, functions) {
         }
 
         throw new SyntaxError('delete currently supports property targets only');
+      }
+
+      if (node.op === 'typeof') {
+        return [
+          ...compileExpression(node.value, scope, propertyIds, functions),
+          ...TYPEOF_STRINGS.flatMap((value) => compileStringLiteral(value, scope)),
+          ...call(RuntimeFn.typeOf),
+        ];
       }
 
       const value = compileExpression(node.value, scope, propertyIds, functions);
@@ -4066,6 +4153,10 @@ export function compileDynamic(source) {
       ValType.i64, ValType.i64, ValType.i32,
       ValType.i64, ValType.i32, ValType.i64,
     ], [ValType.i64]),
+    functionType([
+      ValType.i64, ValType.i64, ValType.i64,
+      ValType.i64, ValType.i64, ValType.i64,
+    ], [ValType.i64]),
   ];
 
   const sourceTypes = program.functions.map((fn) => (
@@ -4131,6 +4222,7 @@ export function compileDynamic(source) {
     arrayWithBody(),
     arrayToReversedBody(),
     arrayToSplicedBody(),
+    typeOfBody(),
     ...program.functions.map((fn) => (
       compileSourceFunction(fn, propertyIds, functions, stringLayout.pointers)
     )),
