@@ -505,9 +505,10 @@ const RuntimeFn = Object.freeze({
   arraySlice: 24,
   arrayLastIndexOf: 25,
   arrayReverse: 26,
+  arrayFill: 27,
 });
 
-const RuntimeFunctionCount = 27;
+const RuntimeFunctionCount = 28;
 
 const emptyBlock = 0x40;
 
@@ -2352,6 +2353,58 @@ function arrayReverseBody() {
   });
 }
 
+function arrayFillBody() {
+  return encodeFunctionBody({
+    locals: [
+      ValType.i32, ValType.i32, ValType.i32, ValType.i32,
+    ],
+    instructions: [
+      ...localGet(0),
+      Op.i32WrapI64,
+      Op.i32Load, ...memarg(2, 4),
+      ...localSet(4),
+
+      ...localGet(2),
+      ...localGet(4),
+      ...i32Const(0),
+      ...call(RuntimeFn.relativeIndex),
+      ...localSet(5),
+
+      ...localGet(3),
+      ...localGet(4),
+      ...localGet(4),
+      ...call(RuntimeFn.relativeIndex),
+      ...localSet(6),
+
+      ...localGet(5),
+      ...localSet(7),
+
+      Op.block, emptyBlock,
+        Op.loop, emptyBlock,
+          ...localGet(7),
+          ...localGet(6),
+          Op.i32GeU,
+          Op.brIf, ...u32(1),
+
+          ...localGet(0),
+          ...localGet(7),
+          ...localGet(1),
+          ...call(RuntimeFn.arraySet),
+          Op.drop,
+
+          ...localGet(7),
+          ...i32Const(1),
+          Op.i32Add,
+          ...localSet(7),
+          Op.br, ...u32(0),
+        Op.end,
+      Op.end,
+
+      ...localGet(0),
+    ],
+  });
+}
+
 function collectPropertyNames(program) {
   const names = new Set();
 
@@ -2696,6 +2749,23 @@ function compileExpression(node, scope, propertyIds, functions) {
         ...call(RuntimeFn.objectGet),
       ];
     case 'call': {
+      if (node.callee.type === 'member' && node.callee.property === 'fill') {
+        if (node.args.length < 1 || node.args.length > 3) {
+          throw new TypeError('Array.fill expects one to three arguments');
+        }
+        return [
+          ...compileExpression(node.callee.object, scope, propertyIds, functions),
+          ...compileExpression(node.args[0], scope, propertyIds, functions),
+          ...(node.args.length >= 2
+            ? compileExpression(node.args[1], scope, propertyIds, functions)
+            : i64Const(numberToBits(0))),
+          ...(node.args.length >= 3
+            ? compileExpression(node.args[2], scope, propertyIds, functions)
+            : i64Const(JSValue.UNDEFINED)),
+          ...call(RuntimeFn.arrayFill),
+        ];
+      }
+
       if (node.callee.type === 'member' && node.callee.property === 'reverse') {
         if (node.args.length !== 0) {
           throw new TypeError('Array.reverse expects no arguments');
@@ -3071,6 +3141,7 @@ export function compileDynamic(source) {
     functionType([ValType.i64, ValType.i64, ValType.i64], [ValType.i64]),
     functionType([ValType.i64, ValType.i64, ValType.i64], [ValType.i64]),
     functionType([ValType.i64], [ValType.i64]),
+    functionType([ValType.i64, ValType.i64, ValType.i64, ValType.i64], [ValType.i64]),
   ];
 
   const sourceTypes = program.functions.map((fn) => (
@@ -3128,6 +3199,7 @@ export function compileDynamic(source) {
     arraySliceBody(),
     arrayLastIndexOfBody(),
     arrayReverseBody(),
+    arrayFillBody(),
     ...program.functions.map((fn) => (
       compileSourceFunction(fn, propertyIds, functions, stringLayout.pointers)
     )),
