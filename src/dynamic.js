@@ -16,7 +16,7 @@ import { JSValue, numberToBits } from './jsvalue.js';
 const KEYWORDS = new Set([
   'export', 'function', 'return', 'let', 'const',
   'true', 'false', 'null', 'undefined',
-  'if', 'else', 'while', 'break', 'continue', 'delete', 'typeof',
+  'if', 'else', 'while', 'break', 'continue', 'delete', 'typeof', 'void',
 ]);
 
 const MULTI_CHAR_TOKENS = ['===', '!==', '<=', '>=', '&&', '||'];
@@ -349,6 +349,7 @@ class Parser {
   parseUnary() {
     if (this.maybe('delete')) return { type: 'unary', op: 'delete', value: this.parseUnary() };
     if (this.maybe('typeof')) return { type: 'unary', op: 'typeof', value: this.parseUnary() };
+    if (this.maybe('void')) return { type: 'unary', op: 'void', value: this.parseUnary() };
     if (this.maybe('-')) return { type: 'unary', op: '-', value: this.parseUnary() };
     if (this.maybe('+')) return { type: 'unary', op: '+', value: this.parseUnary() };
     if (this.maybe('!')) return { type: 'unary', op: '!', value: this.parseUnary() };
@@ -3526,6 +3527,14 @@ function compileExpression(node, scope, propertyIds, functions) {
           ...compileExpression(node.value, scope, propertyIds, functions),
           ...TYPEOF_STRINGS.flatMap((value) => compileStringLiteral(value, scope)),
           ...call(RuntimeFn.typeOf),
+        ];
+      }
+
+      if (node.op === 'void') {
+        return [
+          ...compileExpression(node.value, scope, propertyIds, functions),
+          Op.drop,
+          ...i64Const(JSValue.UNDEFINED),
         ];
       }
 
