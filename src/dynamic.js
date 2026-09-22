@@ -506,9 +506,11 @@ const RuntimeFn = Object.freeze({
   arrayLastIndexOf: 25,
   arrayReverse: 26,
   arrayFill: 27,
+  arrayDelete: 28,
+  arrayCopyWithin: 29,
 });
 
-const RuntimeFunctionCount = 28;
+const RuntimeFunctionCount = 30;
 
 const emptyBlock = 0x40;
 
@@ -2405,6 +2407,214 @@ function arrayFillBody() {
   });
 }
 
+function arrayDeleteBody() {
+  return encodeFunctionBody({
+    locals: [
+      ValType.i32, ValType.i32, ValType.i32,
+      ValType.i32, ValType.i32,
+    ],
+    instructions: [
+      ...localGet(0),
+      Op.i32WrapI64,
+      ...localSet(2),
+
+      ...i32Const(0),
+      ...localSet(3),
+
+      ...localGet(2),
+      Op.i32Load, ...memarg(2, 0),
+      ...localSet(4),
+
+      ...localGet(1),
+      ...i32Const(-2147483648),
+      Op.i32Xor,
+      ...localSet(6),
+
+      Op.block, emptyBlock,
+        Op.loop, emptyBlock,
+          ...localGet(4),
+          Op.i32Eqz,
+          Op.brIf, ...u32(1),
+
+          ...localGet(4),
+          Op.i32Load, ...memarg(2, 0),
+          ...localSet(5),
+
+          ...localGet(4),
+          Op.i32Load, ...memarg(2, 4),
+          ...localGet(6),
+          Op.i32Eq,
+          Op.if, emptyBlock,
+            ...localGet(3),
+            Op.i32Eqz,
+            Op.if, emptyBlock,
+              ...localGet(2),
+              ...localGet(5),
+              Op.i32Store, ...memarg(2, 0),
+            Op.else,
+              ...localGet(3),
+              ...localGet(5),
+              Op.i32Store, ...memarg(2, 0),
+            Op.end,
+          Op.else,
+            ...localGet(4),
+            ...localSet(3),
+          Op.end,
+
+          ...localGet(5),
+          ...localSet(4),
+          Op.br, ...u32(0),
+        Op.end,
+      Op.end,
+
+      ...localGet(0),
+    ],
+  });
+}
+
+function arrayCopyWithinBody() {
+  return encodeFunctionBody({
+    locals: [
+      ValType.i32, ValType.i32, ValType.i32, ValType.i32,
+      ValType.i32, ValType.i32, ValType.i32, ValType.i32,
+      ValType.i32, ValType.i64,
+    ],
+    instructions: [
+      ...localGet(0),
+      Op.i32WrapI64,
+      Op.i32Load, ...memarg(2, 4),
+      ...localSet(4),
+
+      ...localGet(1),
+      ...localGet(4),
+      ...i32Const(0),
+      ...call(RuntimeFn.relativeIndex),
+      ...localSet(5),
+
+      ...localGet(2),
+      ...localGet(4),
+      ...i32Const(0),
+      ...call(RuntimeFn.relativeIndex),
+      ...localSet(6),
+
+      ...localGet(3),
+      ...localGet(4),
+      ...localGet(4),
+      ...call(RuntimeFn.relativeIndex),
+      ...localSet(7),
+
+      ...localGet(7),
+      ...localGet(6),
+      Op.i32LtS,
+      Op.if, emptyBlock,
+        ...i32Const(0),
+        ...localSet(8),
+      Op.else,
+        ...localGet(7),
+        ...localGet(6),
+        Op.i32Sub,
+        ...localSet(8),
+      Op.end,
+
+      ...localGet(4),
+      ...localGet(5),
+      Op.i32Sub,
+      ...localSet(9),
+
+      ...localGet(9),
+      ...localGet(8),
+      Op.i32LtS,
+      Op.if, emptyBlock,
+        ...localGet(9),
+        ...localSet(8),
+      Op.end,
+
+      ...localGet(6),
+      ...localSet(10),
+      ...localGet(5),
+      ...localSet(11),
+      ...i32Const(1),
+      ...localSet(12),
+
+      ...localGet(6),
+      ...localGet(5),
+      Op.i32LtS,
+      ...localGet(5),
+      ...localGet(6),
+      ...localGet(8),
+      Op.i32Add,
+      Op.i32LtS,
+      Op.i32And,
+      Op.if, emptyBlock,
+        ...localGet(6),
+        ...localGet(8),
+        Op.i32Add,
+        ...i32Const(1),
+        Op.i32Sub,
+        ...localSet(10),
+
+        ...localGet(5),
+        ...localGet(8),
+        Op.i32Add,
+        ...i32Const(1),
+        Op.i32Sub,
+        ...localSet(11),
+
+        ...i32Const(-1),
+        ...localSet(12),
+      Op.end,
+
+      Op.block, emptyBlock,
+        Op.loop, emptyBlock,
+          ...localGet(8),
+          Op.i32Eqz,
+          Op.brIf, ...u32(1),
+
+          ...localGet(0),
+          ...localGet(10),
+          ...call(RuntimeFn.arrayHas),
+          Op.if, emptyBlock,
+            ...localGet(0),
+            ...localGet(10),
+            ...call(RuntimeFn.arrayGet),
+            ...localSet(13),
+
+            ...localGet(0),
+            ...localGet(11),
+            ...localGet(13),
+            ...call(RuntimeFn.arraySet),
+            Op.drop,
+          Op.else,
+            ...localGet(0),
+            ...localGet(11),
+            ...call(RuntimeFn.arrayDelete),
+            Op.drop,
+          Op.end,
+
+          ...localGet(10),
+          ...localGet(12),
+          Op.i32Add,
+          ...localSet(10),
+
+          ...localGet(11),
+          ...localGet(12),
+          Op.i32Add,
+          ...localSet(11),
+
+          ...localGet(8),
+          ...i32Const(1),
+          Op.i32Sub,
+          ...localSet(8),
+
+          Op.br, ...u32(0),
+        Op.end,
+      Op.end,
+
+      ...localGet(0),
+    ],
+  });
+}
+
 function collectPropertyNames(program) {
   const names = new Set();
 
@@ -2749,6 +2959,21 @@ function compileExpression(node, scope, propertyIds, functions) {
         ...call(RuntimeFn.objectGet),
       ];
     case 'call': {
+      if (node.callee.type === 'member' && node.callee.property === 'copyWithin') {
+        if (node.args.length < 2 || node.args.length > 3) {
+          throw new TypeError('Array.copyWithin expects two or three arguments');
+        }
+        return [
+          ...compileExpression(node.callee.object, scope, propertyIds, functions),
+          ...compileExpression(node.args[0], scope, propertyIds, functions),
+          ...compileExpression(node.args[1], scope, propertyIds, functions),
+          ...(node.args.length >= 3
+            ? compileExpression(node.args[2], scope, propertyIds, functions)
+            : i64Const(JSValue.UNDEFINED)),
+          ...call(RuntimeFn.arrayCopyWithin),
+        ];
+      }
+
       if (node.callee.type === 'member' && node.callee.property === 'fill') {
         if (node.args.length < 1 || node.args.length > 3) {
           throw new TypeError('Array.fill expects one to three arguments');
@@ -3142,6 +3367,8 @@ export function compileDynamic(source) {
     functionType([ValType.i64, ValType.i64, ValType.i64], [ValType.i64]),
     functionType([ValType.i64], [ValType.i64]),
     functionType([ValType.i64, ValType.i64, ValType.i64, ValType.i64], [ValType.i64]),
+    functionType([ValType.i64, ValType.i32], [ValType.i64]),
+    functionType([ValType.i64, ValType.i64, ValType.i64, ValType.i64], [ValType.i64]),
   ];
 
   const sourceTypes = program.functions.map((fn) => (
@@ -3200,6 +3427,8 @@ export function compileDynamic(source) {
     arrayLastIndexOfBody(),
     arrayReverseBody(),
     arrayFillBody(),
+    arrayDeleteBody(),
+    arrayCopyWithinBody(),
     ...program.functions.map((fn) => (
       compileSourceFunction(fn, propertyIds, functions, stringLayout.pointers)
     )),
