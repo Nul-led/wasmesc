@@ -19,7 +19,7 @@ const KEYWORDS = new Set([
   'if', 'else', 'while', 'break', 'continue',
 ]);
 
-const MULTI_CHAR_TOKENS = ['===', '!==', '<=', '>='];
+const MULTI_CHAR_TOKENS = ['===', '!==', '<=', '>=', '&&', '||'];
 
 function readHexEscape(source, start, length) {
   const text = source.slice(start, start + length);
@@ -312,16 +312,18 @@ class Parser {
   parseExpression(minPrecedence = 0) {
     let left = this.parseUnary();
     const precedence = {
-      '===': 0,
-      '!==': 0,
-      '<': 1,
-      '<=': 1,
-      '>': 1,
-      '>=': 1,
-      '+': 2,
-      '-': 2,
-      '*': 3,
-      '/': 3,
+      '||': 0,
+      '&&': 1,
+      '===': 2,
+      '!==': 2,
+      '<': 3,
+      '<=': 3,
+      '>': 3,
+      '>=': 3,
+      '+': 4,
+      '-': 4,
+      '*': 5,
+      '/': 5,
     };
 
     while (true) {
@@ -2960,6 +2962,23 @@ function compileExpression(node, scope, propertyIds, functions) {
       ];
     }
     case 'binary': {
+      if (node.op === '&&' || node.op === '||') {
+        const left = compileExpression(node.left, scope, propertyIds, functions);
+        const right = compileExpression(node.right, scope, propertyIds, functions);
+        const leftValue = [Op.localGet, ...u32(scope.scratchIndex)];
+
+        return [
+          ...left,
+          Op.localTee, ...u32(scope.scratchIndex),
+          ...call(RuntimeFn.truthy),
+          Op.if, ValType.i64,
+            ...(node.op === '&&' ? right : leftValue),
+          Op.else,
+            ...(node.op === '&&' ? leftValue : right),
+          Op.end,
+        ];
+      }
+
       if (node.op === '+') {
         return [
           ...compileExpression(node.left, scope, propertyIds, functions),
@@ -3409,6 +3428,7 @@ function childScope(parent) {
   const scope = new Map(parent);
   scope.paramCount = parent.paramCount;
   scope.stringLiterals = parent.stringLiterals;
+  scope.scratchIndex = parent.scratchIndex;
   return scope;
 }
 
@@ -3420,9 +3440,10 @@ function compileSourceFunction(fn, propertyIds, functions, stringLiterals) {
   const scope = new Map();
   scope.paramCount = fn.params.length;
   scope.stringLiterals = stringLiterals;
+  scope.scratchIndex = fn.params.length;
   fn.params.forEach((name, index) => scope.set(name, { index, kind: 'param' }));
 
-  const locals = [];
+  const locals = [ValType.i64];
   const instructions = compileStatements(
     fn.statements,
     scope,
