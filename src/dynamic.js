@@ -498,9 +498,10 @@ const RuntimeFn = Object.freeze({
   arrayAt: 17,
   arrayShift: 18,
   arrayUnshift: 19,
+  arrayIncludes: 20,
 });
 
-const RuntimeFunctionCount = 20;
+const RuntimeFunctionCount = 21;
 
 const emptyBlock = 0x40;
 
@@ -1715,6 +1716,118 @@ function arrayUnshiftBody() {
   });
 }
 
+function arrayIncludesBody() {
+  return encodeFunctionBody({
+    locals: [ValType.f64, ValType.i32, ValType.i32, ValType.i64],
+    instructions: [
+      ...localGet(2),
+      Op.f64ReinterpretI64,
+      ...localSet(3),
+
+      ...localGet(3),
+      ...localGet(3),
+      Op.f64Ne,
+      Op.if, emptyBlock,
+        ...i32Const(0),
+        ...localSet(4),
+      Op.else,
+        ...localGet(3),
+        ...f64Const(2147483647),
+        Op.f64Gt,
+        Op.if, emptyBlock,
+          ...i64Const(JSValue.FALSE),
+          Op.return,
+        Op.end,
+
+        ...localGet(3),
+        ...f64Const(-2147483648),
+        Op.f64Lt,
+        Op.if, emptyBlock,
+          ...i32Const(0),
+          ...localSet(4),
+        Op.else,
+          ...localGet(3),
+          Op.i32TruncF64S,
+          ...localSet(4),
+        Op.end,
+      Op.end,
+
+      ...localGet(0),
+      Op.i32WrapI64,
+      Op.i32Load, ...memarg(2, 4),
+      ...localSet(5),
+
+      ...localGet(4),
+      ...i32Const(0),
+      Op.i32LtS,
+      Op.if, emptyBlock,
+        ...localGet(4),
+        ...localGet(5),
+        Op.i32Add,
+        ...localSet(4),
+
+        ...localGet(4),
+        ...i32Const(0),
+        Op.i32LtS,
+        Op.if, emptyBlock,
+          ...i32Const(0),
+          ...localSet(4),
+        Op.end,
+      Op.else,
+        ...localGet(4),
+        ...localGet(5),
+        Op.i32GeU,
+        Op.if, emptyBlock,
+          ...i64Const(JSValue.FALSE),
+          Op.return,
+        Op.end,
+      Op.end,
+
+      Op.block, emptyBlock,
+        Op.loop, emptyBlock,
+          ...localGet(4),
+          ...localGet(5),
+          Op.i32GeU,
+          Op.brIf, ...u32(1),
+
+          ...localGet(0),
+          ...localGet(4),
+          ...call(RuntimeFn.arrayGet),
+          ...localSet(6),
+
+          ...localGet(6),
+          ...localGet(1),
+          ...call(RuntimeFn.strictEqual),
+          Op.if, emptyBlock,
+            ...i64Const(JSValue.TRUE),
+            Op.return,
+          Op.end,
+
+          ...localGet(6),
+          ...i64Const(JSValue.CANONICAL_NAN),
+          Op.i64Eq,
+          ...localGet(1),
+          ...i64Const(JSValue.CANONICAL_NAN),
+          Op.i64Eq,
+          Op.i32And,
+          Op.if, emptyBlock,
+            ...i64Const(JSValue.TRUE),
+            Op.return,
+          Op.end,
+
+          ...localGet(4),
+          ...i32Const(1),
+          Op.i32Add,
+          ...localSet(4),
+          Op.br, ...u32(0),
+        Op.end,
+      Op.end,
+
+      ...i64Const(JSValue.FALSE),
+    ],
+  });
+}
+
 function collectPropertyNames(program) {
   const names = new Set();
 
@@ -2059,6 +2172,20 @@ function compileExpression(node, scope, propertyIds, functions) {
         ...call(RuntimeFn.objectGet),
       ];
     case 'call': {
+      if (node.callee.type === 'member' && node.callee.property === 'includes') {
+        if (node.args.length < 1 || node.args.length > 2) {
+          throw new TypeError('Array.includes expects one or two arguments');
+        }
+        return [
+          ...compileExpression(node.callee.object, scope, propertyIds, functions),
+          ...compileExpression(node.args[0], scope, propertyIds, functions),
+          ...(node.args.length === 2
+            ? compileExpression(node.args[1], scope, propertyIds, functions)
+            : i64Const(numberToBits(0))),
+          ...call(RuntimeFn.arrayIncludes),
+        ];
+      }
+
       if (node.callee.type === 'member' && node.callee.property === 'shift') {
         if (node.args.length !== 0) {
           throw new TypeError('Array.shift expects no arguments');
@@ -2359,6 +2486,7 @@ export function compileDynamic(source) {
     functionType([ValType.i64, ValType.i64], [ValType.i64]),
     functionType([ValType.i64], [ValType.i64]),
     functionType([ValType.i64, ValType.i64], [ValType.i64]),
+    functionType([ValType.i64, ValType.i64, ValType.i64], [ValType.i64]),
   ];
 
   const sourceTypes = program.functions.map((fn) => (
@@ -2409,6 +2537,7 @@ export function compileDynamic(source) {
     arrayAtBody(),
     arrayShiftBody(),
     arrayUnshiftBody(),
+    arrayIncludesBody(),
     ...program.functions.map((fn) => (
       compileSourceFunction(fn, propertyIds, functions, stringLayout.pointers)
     )),
