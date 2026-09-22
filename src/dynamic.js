@@ -432,6 +432,7 @@ class Parser {
 }
 
 const Op = Object.freeze({
+  unreachable: 0x00,
   block: 0x02,
   loop: 0x03,
   if: 0x04,
@@ -521,9 +522,10 @@ const RuntimeFn = Object.freeze({
   arrayCopyWithin: 29,
   arrayConcatOne: 30,
   objectDelete: 31,
+  arrayWith: 32,
 });
 
-const RuntimeFunctionCount = 32;
+const RuntimeFunctionCount = 33;
 
 const emptyBlock = 0x40;
 
@@ -2778,6 +2780,116 @@ function objectDeleteBody() {
   });
 }
 
+function arrayWithBody() {
+  return encodeFunctionBody({
+    locals: [
+      ValType.f64, ValType.i32, ValType.i32,
+      ValType.i32, ValType.i64,
+    ],
+    instructions: [
+      ...localGet(0),
+      Op.i32WrapI64,
+      Op.i32Load, ...memarg(2, 4),
+      ...localSet(4),
+
+      ...localGet(1),
+      Op.f64ReinterpretI64,
+      ...localSet(3),
+
+      ...localGet(3),
+      ...localGet(3),
+      Op.f64Ne,
+      Op.if, emptyBlock,
+        ...i32Const(0),
+        ...localSet(5),
+      Op.else,
+        ...localGet(3),
+        ...f64Const(2147483647),
+        Op.f64Gt,
+        Op.if, emptyBlock,
+          Op.unreachable,
+        Op.end,
+
+        ...localGet(3),
+        ...f64Const(-2147483648),
+        Op.f64Lt,
+        Op.if, emptyBlock,
+          Op.unreachable,
+        Op.end,
+
+        ...localGet(3),
+        Op.i32TruncF64S,
+        ...localSet(5),
+      Op.end,
+
+      ...localGet(5),
+      ...i32Const(0),
+      Op.i32LtS,
+      Op.if, emptyBlock,
+        ...localGet(5),
+        ...localGet(4),
+        Op.i32Add,
+        ...localSet(5),
+      Op.end,
+
+      ...localGet(5),
+      ...i32Const(0),
+      Op.i32LtS,
+      Op.if, emptyBlock,
+        Op.unreachable,
+      Op.end,
+
+      ...localGet(5),
+      ...localGet(4),
+      Op.i32GeU,
+      Op.if, emptyBlock,
+        Op.unreachable,
+      Op.end,
+
+      ...localGet(4),
+      ...call(RuntimeFn.arrayNew),
+      ...localSet(7),
+
+      ...i32Const(0),
+      ...localSet(6),
+
+      Op.block, emptyBlock,
+        Op.loop, emptyBlock,
+          ...localGet(6),
+          ...localGet(4),
+          Op.i32GeU,
+          Op.brIf, ...u32(1),
+
+          ...localGet(7),
+          ...localGet(6),
+
+          ...localGet(6),
+          ...localGet(5),
+          Op.i32Eq,
+          Op.if, ValType.i64,
+            ...localGet(2),
+          Op.else,
+            ...localGet(0),
+            ...localGet(6),
+            ...call(RuntimeFn.arrayGet),
+          Op.end,
+
+          ...call(RuntimeFn.arraySet),
+          Op.drop,
+
+          ...localGet(6),
+          ...i32Const(1),
+          Op.i32Add,
+          ...localSet(6),
+          Op.br, ...u32(0),
+        Op.end,
+      Op.end,
+
+      ...localGet(7),
+    ],
+  });
+}
+
 function collectPropertyNames(program) {
   const names = new Set();
 
@@ -3215,6 +3327,18 @@ function compileExpression(node, scope, propertyIds, functions) {
         ...call(RuntimeFn.objectGet),
       ];
     case 'call': {
+      if (node.callee.type === 'member' && node.callee.property === 'with') {
+        if (node.args.length !== 2) {
+          throw new TypeError('Array.with expects exactly two arguments');
+        }
+        return [
+          ...compileExpression(node.callee.object, scope, propertyIds, functions),
+          ...compileExpression(node.args[0], scope, propertyIds, functions),
+          ...compileExpression(node.args[1], scope, propertyIds, functions),
+          ...call(RuntimeFn.arrayWith),
+        ];
+      }
+
       if (node.callee.type === 'member' && node.callee.property === 'toReversed') {
         if (node.args.length !== 0) {
           throw new TypeError('Array.toReversed expects no arguments');
@@ -3661,6 +3785,7 @@ export function compileDynamic(source) {
     functionType([ValType.i64, ValType.i64, ValType.i64, ValType.i64], [ValType.i64]),
     functionType([ValType.i64, ValType.i64], [ValType.i64]),
     functionType([ValType.i64, ValType.i32], [ValType.i64]),
+    functionType([ValType.i64, ValType.i64, ValType.i64], [ValType.i64]),
   ];
 
   const sourceTypes = program.functions.map((fn) => (
@@ -3723,6 +3848,7 @@ export function compileDynamic(source) {
     arrayCopyWithinBody(),
     arrayConcatOneBody(),
     objectDeleteBody(),
+    arrayWithBody(),
     ...program.functions.map((fn) => (
       compileSourceFunction(fn, propertyIds, functions, stringLayout.pointers)
     )),
