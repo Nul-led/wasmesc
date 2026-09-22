@@ -20,6 +20,7 @@ const KEYWORDS = new Set([
 ]);
 
 const MULTI_CHAR_TOKENS = ['===', '!==', '<=', '>=', '&&', '||'];
+const TYPEOF_STRINGS = ['undefined', 'boolean', 'number', 'string', 'object'];
 
 function readHexEscape(source, start, length) {
   const text = source.slice(start, start + length);
