@@ -3259,10 +3259,7 @@ function collectPropertyNames(program) {
       visitExpression(node.right);
       return;
     }
-    if (node.type === 'unary') {
-      if (node.op === 'typeof') TYPEOF_STRINGS.forEach((value) => values.add(value));
-      visitExpression(node.value);
-    }
+    if (node.type === 'unary') visitExpression(node.value);
   }
 
   function visitStatement(statement) {
@@ -3337,7 +3334,10 @@ function collectStringLiterals(program) {
       visitExpression(node.right);
       return;
     }
-    if (node.type === 'unary') visitExpression(node.value);
+    if (node.type === 'unary') {
+      if (node.op === 'typeof') TYPEOF_STRINGS.forEach((value) => values.add(value));
+      visitExpression(node.value);
+    }
   }
 
   function visitStatement(statement) {
