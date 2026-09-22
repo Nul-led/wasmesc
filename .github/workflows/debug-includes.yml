@@ -1,0 +1,44 @@
+name: debug-includes
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  baseline-compile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: node --input-type=module -e "import { compileDynamic } from './src/dynamic.js'; const b=compileDynamic('function answer(){ return 42; }'); await WebAssembly.compile(b);"
+
+  includes-compile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: node --input-type=module -e "import { compileDynamic } from './src/dynamic.js'; const b=compileDynamic('function answer(){ return [1,2,3].includes(2); }'); await WebAssembly.compile(b);"
+
+  includes-runtime:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: node --test test/array-includes.test.js
+
+  full-suite:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm test
