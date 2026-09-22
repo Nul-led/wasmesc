@@ -3215,6 +3215,19 @@ function compileExpression(node, scope, propertyIds, functions) {
         ...call(RuntimeFn.objectGet),
       ];
     case 'call': {
+      if (node.callee.type === 'member' && node.callee.property === 'toReversed') {
+        if (node.args.length !== 0) {
+          throw new TypeError('Array.toReversed expects no arguments');
+        }
+        return [
+          ...compileExpression(node.callee.object, scope, propertyIds, functions),
+          ...i64Const(numberToBits(0)),
+          ...i64Const(JSValue.UNDEFINED),
+          ...call(RuntimeFn.arraySlice),
+          ...call(RuntimeFn.arrayReverse),
+        ];
+      }
+
       if (node.callee.type === 'member' && node.callee.property === 'concat') {
         if (node.args.length > 1) {
           throw new TypeError('Array.concat currently supports zero or one argument');
