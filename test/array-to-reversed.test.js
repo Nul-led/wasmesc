@@ -37,7 +37,7 @@ test('Array.toReversed returns a reversed copy without mutating the source', asy
   assert.equal(value, 321);
 });
 
-test('Array.toReversed preserves sparse holes', async () => {
+test('Array.toReversed densifies sparse holes as undefined', async () => {
   const { value } = await run(`
     function answer() {
       const source = [1];
@@ -51,8 +51,11 @@ test('Array.toReversed preserves sparse holes', async () => {
       if (copy[0] !== 9 || copy[3] !== 1) {
         return 20;
       }
-      if (copy.indexOf(undefined) !== -1) {
+      if (copy.indexOf(undefined) !== 1) {
         return 30;
+      }
+      if (source.indexOf(undefined) !== -1) {
+        return 40;
       }
       return 42;
     }
