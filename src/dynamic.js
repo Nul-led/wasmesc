@@ -501,9 +501,11 @@ const RuntimeFn = Object.freeze({
   arrayIncludes: 20,
   arrayHas: 21,
   arrayIndexOf: 22,
+  relativeIndex: 23,
+  arraySlice: 24,
 });
 
-const RuntimeFunctionCount = 23;
+const RuntimeFunctionCount = 25;
 
 const emptyBlock = 0x40;
 
@@ -1998,6 +2000,165 @@ function arrayIndexOfBody() {
   });
 }
 
+function relativeIndexBody() {
+  return encodeFunctionBody({
+    locals: [ValType.f64, ValType.i32],
+    instructions: [
+      ...localGet(0),
+      ...i64Const(JSValue.UNDEFINED),
+      Op.i64Eq,
+      Op.if, emptyBlock,
+        ...localGet(2),
+        Op.return,
+      Op.end,
+
+      ...localGet(0),
+      Op.f64ReinterpretI64,
+      ...localSet(3),
+
+      ...localGet(3),
+      ...localGet(3),
+      Op.f64Ne,
+      Op.if, emptyBlock,
+        ...i32Const(0),
+        Op.return,
+      Op.end,
+
+      ...localGet(3),
+      ...f64Const(2147483647),
+      Op.f64Gt,
+      Op.if, emptyBlock,
+        ...localGet(1),
+        Op.return,
+      Op.end,
+
+      ...localGet(3),
+      ...f64Const(-2147483648),
+      Op.f64Lt,
+      Op.if, emptyBlock,
+        ...i32Const(0),
+        Op.return,
+      Op.end,
+
+      ...localGet(3),
+      Op.i32TruncF64S,
+      ...localSet(4),
+
+      ...localGet(4),
+      ...i32Const(0),
+      Op.i32LtS,
+      Op.if, emptyBlock,
+        ...localGet(4),
+        ...localGet(1),
+        Op.i32Add,
+        ...localSet(4),
+
+        ...localGet(4),
+        ...i32Const(0),
+        Op.i32LtS,
+        Op.if, emptyBlock,
+          ...i32Const(0),
+          Op.return,
+        Op.end,
+
+        ...localGet(4),
+        Op.return,
+      Op.end,
+
+      ...localGet(4),
+      ...localGet(1),
+      Op.i32GeU,
+      Op.if, emptyBlock,
+        ...localGet(1),
+        Op.return,
+      Op.end,
+
+      ...localGet(4),
+    ],
+  });
+}
+
+function arraySliceBody() {
+  return encodeFunctionBody({
+    locals: [
+      ValType.i32, ValType.i32, ValType.i32,
+      ValType.i32, ValType.i32, ValType.i64,
+    ],
+    instructions: [
+      ...localGet(0),
+      Op.i32WrapI64,
+      Op.i32Load, ...memarg(2, 4),
+      ...localSet(3),
+
+      ...localGet(1),
+      ...localGet(3),
+      ...i32Const(0),
+      ...call(RuntimeFn.relativeIndex),
+      ...localSet(4),
+
+      ...localGet(2),
+      ...localGet(3),
+      ...localGet(3),
+      ...call(RuntimeFn.relativeIndex),
+      ...localSet(5),
+
+      ...localGet(5),
+      ...localGet(4),
+      Op.i32LtS,
+      Op.if, emptyBlock,
+        ...i32Const(0),
+        ...localSet(6),
+      Op.else,
+        ...localGet(5),
+        ...localGet(4),
+        Op.i32Sub,
+        ...localSet(6),
+      Op.end,
+
+      ...localGet(6),
+      ...call(RuntimeFn.arrayNew),
+      ...localSet(8),
+
+      ...i32Const(0),
+      ...localSet(7),
+
+      Op.block, emptyBlock,
+        Op.loop, emptyBlock,
+          ...localGet(7),
+          ...localGet(6),
+          Op.i32GeU,
+          Op.brIf, ...u32(1),
+
+          ...localGet(0),
+          ...localGet(4),
+          ...localGet(7),
+          Op.i32Add,
+          ...call(RuntimeFn.arrayHas),
+          Op.if, emptyBlock,
+            ...localGet(8),
+            ...localGet(7),
+            ...localGet(0),
+            ...localGet(4),
+            ...localGet(7),
+            Op.i32Add,
+            ...call(RuntimeFn.arrayGet),
+            ...call(RuntimeFn.arraySet),
+            Op.drop,
+          Op.end,
+
+          ...localGet(7),
+          ...i32Const(1),
+          Op.i32Add,
+          ...localSet(7),
+          Op.br, ...u32(0),
+        Op.end,
+      Op.end,
+
+      ...localGet(8),
+    ],
+  });
+}
+
 function collectPropertyNames(program) {
   const names = new Set();
 
@@ -2342,6 +2503,22 @@ function compileExpression(node, scope, propertyIds, functions) {
         ...call(RuntimeFn.objectGet),
       ];
     case 'call': {
+      if (node.callee.type === 'member' && node.callee.property === 'slice') {
+        if (node.args.length > 2) {
+          throw new TypeError('Array.slice expects zero, one, or two arguments');
+        }
+        return [
+          ...compileExpression(node.callee.object, scope, propertyIds, functions),
+          ...(node.args.length >= 1
+            ? compileExpression(node.args[0], scope, propertyIds, functions)
+            : i64Const(numberToBits(0))),
+          ...(node.args.length >= 2
+            ? compileExpression(node.args[1], scope, propertyIds, functions)
+            : i64Const(JSValue.UNDEFINED)),
+          ...call(RuntimeFn.arraySlice),
+        ];
+      }
+
       if (node.callee.type === 'member' && node.callee.property === 'indexOf') {
         if (node.args.length < 1 || node.args.length > 2) {
           throw new TypeError('Array.indexOf expects one or two arguments');
@@ -2673,6 +2850,8 @@ export function compileDynamic(source) {
     functionType([ValType.i64, ValType.i64, ValType.i64], [ValType.i64]),
     functionType([ValType.i64, ValType.i32], [ValType.i32]),
     functionType([ValType.i64, ValType.i64, ValType.i64], [ValType.i64]),
+    functionType([ValType.i64, ValType.i32, ValType.i32], [ValType.i32]),
+    functionType([ValType.i64, ValType.i64, ValType.i64], [ValType.i64]),
   ];
 
   const sourceTypes = program.functions.map((fn) => (
@@ -2726,6 +2905,8 @@ export function compileDynamic(source) {
     arrayIncludesBody(),
     arrayHasBody(),
     arrayIndexOfBody(),
+    relativeIndexBody(),
+    arraySliceBody(),
     ...program.functions.map((fn) => (
       compileSourceFunction(fn, propertyIds, functions, stringLayout.pointers)
     )),
