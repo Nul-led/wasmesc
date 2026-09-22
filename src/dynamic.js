@@ -508,9 +508,10 @@ const RuntimeFn = Object.freeze({
   arrayFill: 27,
   arrayDelete: 28,
   arrayCopyWithin: 29,
+  arrayConcatOne: 30,
 });
 
-const RuntimeFunctionCount = 30;
+const RuntimeFunctionCount = 31;
 
 const emptyBlock = 0x40;
 
@@ -2615,6 +2616,97 @@ function arrayCopyWithinBody() {
   });
 }
 
+function arrayConcatOneBody() {
+  return encodeFunctionBody({
+    locals: [
+      ValType.i64,
+      ValType.i32, ValType.i32, ValType.i32,
+      ValType.i32, ValType.i32,
+      ValType.i64,
+    ],
+    instructions: [
+      ...localGet(0),
+      ...i64Const(numberToBits(0)),
+      ...i64Const(JSValue.UNDEFINED),
+      ...call(RuntimeFn.arraySlice),
+      ...localSet(2),
+
+      ...localGet(2),
+      Op.i32WrapI64,
+      ...localSet(3),
+
+      ...localGet(3),
+      Op.i32Load, ...memarg(2, 4),
+      ...localSet(4),
+
+      ...localGet(1),
+      ...i64Const(JSValue.TAG_MASK),
+      Op.i64And,
+      ...i64Const(JSValue.ARRAY),
+      Op.i64Eq,
+      Op.if, emptyBlock,
+        ...localGet(1),
+        Op.i32WrapI64,
+        ...localSet(5),
+
+        ...localGet(5),
+        Op.i32Load, ...memarg(2, 4),
+        ...localSet(6),
+
+        ...i32Const(0),
+        ...localSet(7),
+
+        Op.block, emptyBlock,
+          Op.loop, emptyBlock,
+            ...localGet(7),
+            ...localGet(6),
+            Op.i32GeU,
+            Op.brIf, ...u32(1),
+
+            ...localGet(1),
+            ...localGet(7),
+            ...call(RuntimeFn.arrayHas),
+            Op.if, emptyBlock,
+              ...localGet(1),
+              ...localGet(7),
+              ...call(RuntimeFn.arrayGet),
+              ...localSet(8),
+
+              ...localGet(2),
+              ...localGet(4),
+              ...localGet(7),
+              Op.i32Add,
+              ...localGet(8),
+              ...call(RuntimeFn.arraySet),
+              Op.drop,
+            Op.end,
+
+            ...localGet(7),
+            ...i32Const(1),
+            Op.i32Add,
+            ...localSet(7),
+            Op.br, ...u32(0),
+          Op.end,
+        Op.end,
+
+        ...localGet(3),
+        ...localGet(4),
+        ...localGet(6),
+        Op.i32Add,
+        Op.i32Store, ...memarg(2, 4),
+      Op.else,
+        ...localGet(2),
+        ...localGet(4),
+        ...localGet(1),
+        ...call(RuntimeFn.arraySet),
+        ...localSet(2),
+      Op.end,
+
+      ...localGet(2),
+    ],
+  });
+}
+
 function collectPropertyNames(program) {
   const names = new Set();
 
@@ -2959,6 +3051,25 @@ function compileExpression(node, scope, propertyIds, functions) {
         ...call(RuntimeFn.objectGet),
       ];
     case 'call': {
+      if (node.callee.type === 'member' && node.callee.property === 'concat') {
+        if (node.args.length > 1) {
+          throw new TypeError('Array.concat currently supports zero or one argument');
+        }
+        if (node.args.length === 0) {
+          return [
+            ...compileExpression(node.callee.object, scope, propertyIds, functions),
+            ...i64Const(numberToBits(0)),
+            ...i64Const(JSValue.UNDEFINED),
+            ...call(RuntimeFn.arraySlice),
+          ];
+        }
+        return [
+          ...compileExpression(node.callee.object, scope, propertyIds, functions),
+          ...compileExpression(node.args[0], scope, propertyIds, functions),
+          ...call(RuntimeFn.arrayConcatOne),
+        ];
+      }
+
       if (node.callee.type === 'member' && node.callee.property === 'copyWithin') {
         if (node.args.length < 2 || node.args.length > 3) {
           throw new TypeError('Array.copyWithin expects two or three arguments');
@@ -3369,6 +3480,7 @@ export function compileDynamic(source) {
     functionType([ValType.i64, ValType.i64, ValType.i64, ValType.i64], [ValType.i64]),
     functionType([ValType.i64, ValType.i32], [ValType.i64]),
     functionType([ValType.i64, ValType.i64, ValType.i64, ValType.i64], [ValType.i64]),
+    functionType([ValType.i64, ValType.i64], [ValType.i64]),
   ];
 
   const sourceTypes = program.functions.map((fn) => (
@@ -3429,6 +3541,7 @@ export function compileDynamic(source) {
     arrayFillBody(),
     arrayDeleteBody(),
     arrayCopyWithinBody(),
+    arrayConcatOneBody(),
     ...program.functions.map((fn) => (
       compileSourceFunction(fn, propertyIds, functions, stringLayout.pointers)
     )),
