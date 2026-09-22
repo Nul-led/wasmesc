@@ -157,7 +157,7 @@ function tokenize(source) {
       continue;
     }
 
-    if ('()+-*/[]{},;=:.<>!'.includes(ch)) {
+    if ('()+-*/[]{},;=:.<>!?'.includes(ch)) {
       tokens.push({ type: ch, value: ch, pos: i });
       i += 1;
       continue;
@@ -334,6 +334,14 @@ class Parser {
       const right = this.parseExpression(p + 1);
       left = { type: 'binary', op, left, right };
     }
+
+    if (minPrecedence === 0 && this.maybe('?')) {
+      const consequent = this.parseExpression();
+      this.take(':');
+      const alternate = this.parseExpression();
+      left = { type: 'conditional', test: left, consequent, alternate };
+    }
+
     return left;
   }
 
@@ -2745,6 +2753,12 @@ function collectPropertyNames(program) {
       node.args.forEach(visitExpression);
       return;
     }
+    if (node.type === 'conditional') {
+      visitExpression(node.test);
+      visitExpression(node.consequent);
+      visitExpression(node.alternate);
+      return;
+    }
     if (node.type === 'binary') {
       visitExpression(node.left);
       visitExpression(node.right);
@@ -2812,6 +2826,12 @@ function collectStringLiterals(program) {
     if (node.type === 'call') {
       visitExpression(node.callee);
       node.args.forEach(visitExpression);
+      return;
+    }
+    if (node.type === 'conditional') {
+      visitExpression(node.test);
+      visitExpression(node.consequent);
+      visitExpression(node.alternate);
       return;
     }
     if (node.type === 'binary') {
@@ -2961,6 +2981,16 @@ function compileExpression(node, scope, propertyIds, functions) {
         ...call(RuntimeFn.numberFromF64),
       ];
     }
+    case 'conditional':
+      return [
+        ...compileExpression(node.test, scope, propertyIds, functions),
+        ...call(RuntimeFn.truthy),
+        Op.if, ValType.i64,
+          ...compileExpression(node.consequent, scope, propertyIds, functions),
+        Op.else,
+          ...compileExpression(node.alternate, scope, propertyIds, functions),
+        Op.end,
+      ];
     case 'binary': {
       if (node.op === '&&' || node.op === '||') {
         const left = compileExpression(node.left, scope, propertyIds, functions);
