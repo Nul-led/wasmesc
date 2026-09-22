@@ -16,7 +16,7 @@ import { JSValue, numberToBits } from './jsvalue.js';
 const KEYWORDS = new Set([
   'export', 'function', 'return', 'let', 'const',
   'true', 'false', 'null', 'undefined',
-  'if', 'else', 'while', 'break', 'continue',
+  'if', 'else', 'while', 'break', 'continue', 'delete',
 ]);
 
 const MULTI_CHAR_TOKENS = ['===', '!==', '<=', '>=', '&&', '||'];
@@ -346,6 +346,7 @@ class Parser {
   }
 
   parseUnary() {
+    if (this.maybe('delete')) return { type: 'unary', op: 'delete', value: this.parseUnary() };
     if (this.maybe('-')) return { type: 'unary', op: '-', value: this.parseUnary() };
     if (this.maybe('+')) return { type: 'unary', op: '+', value: this.parseUnary() };
     if (this.maybe('!')) return { type: 'unary', op: '!', value: this.parseUnary() };
@@ -519,9 +520,10 @@ const RuntimeFn = Object.freeze({
   arrayDelete: 28,
   arrayCopyWithin: 29,
   arrayConcatOne: 30,
+  objectDelete: 31,
 });
 
-const RuntimeFunctionCount = 31;
+const RuntimeFunctionCount = 32;
 
 const emptyBlock = 0x40;
 
@@ -2717,6 +2719,65 @@ function arrayConcatOneBody() {
   });
 }
 
+function objectDeleteBody() {
+  return encodeFunctionBody({
+    locals: [
+      ValType.i32, ValType.i32, ValType.i32, ValType.i32,
+    ],
+    instructions: [
+      ...localGet(0),
+      Op.i32WrapI64,
+      ...localSet(2),
+
+      ...i32Const(0),
+      ...localSet(3),
+
+      ...localGet(2),
+      Op.i32Load, ...memarg(2, 0),
+      ...localSet(4),
+
+      Op.block, emptyBlock,
+        Op.loop, emptyBlock,
+          ...localGet(4),
+          Op.i32Eqz,
+          Op.brIf, ...u32(1),
+
+          ...localGet(4),
+          Op.i32Load, ...memarg(2, 0),
+          ...localSet(5),
+
+          ...localGet(4),
+          Op.i32Load, ...memarg(2, 4),
+          ...localGet(1),
+          Op.i32Eq,
+          Op.if, emptyBlock,
+            ...localGet(3),
+            Op.i32Eqz,
+            Op.if, emptyBlock,
+              ...localGet(2),
+              ...localGet(5),
+              Op.i32Store, ...memarg(2, 0),
+            Op.else,
+              ...localGet(3),
+              ...localGet(5),
+              Op.i32Store, ...memarg(2, 0),
+            Op.end,
+          Op.else,
+            ...localGet(4),
+            ...localSet(3),
+          Op.end,
+
+          ...localGet(5),
+          ...localSet(4),
+          Op.br, ...u32(0),
+        Op.end,
+      Op.end,
+
+      ...localGet(0),
+    ],
+  });
+}
+
 function collectPropertyNames(program) {
   const names = new Set();
 
@@ -2965,6 +3026,60 @@ function compileExpression(node, scope, propertyIds, functions) {
     case 'id':
       return localGet(bindingIndex(scope, node.name));
     case 'unary': {
+      if (node.op === 'delete') {
+        const target = node.value;
+
+        if (target.type === 'member') {
+          if (target.property === 'length') {
+            throw new SyntaxError('Deleting length is not supported yet');
+          }
+          return [
+            ...compileExpression(target.object, scope, propertyIds, functions),
+            ...i32Const(propertyIds.get(target.property)),
+            ...call(RuntimeFn.objectDelete),
+            Op.drop,
+            ...i64Const(JSValue.TRUE),
+          ];
+        }
+
+        if (target.type === 'index') {
+          if (target.index.type === 'string') {
+            if (target.index.value === 'length') {
+              throw new SyntaxError('Deleting length is not supported yet');
+            }
+
+            const numericIndex = staticArrayIndex(target.index.value);
+            if (numericIndex !== null) {
+              return [
+                ...compileExpression(target.object, scope, propertyIds, functions),
+                ...i32Const(numericIndex),
+                ...call(RuntimeFn.arrayDelete),
+                Op.drop,
+                ...i64Const(JSValue.TRUE),
+              ];
+            }
+
+            return [
+              ...compileExpression(target.object, scope, propertyIds, functions),
+              ...i32Const(propertyIds.get(target.index.value)),
+              ...call(RuntimeFn.objectDelete),
+              Op.drop,
+              ...i64Const(JSValue.TRUE),
+            ];
+          }
+
+          return [
+            ...compileExpression(target.object, scope, propertyIds, functions),
+            ...compileArrayIndex(target.index, scope, propertyIds, functions),
+            ...call(RuntimeFn.arrayDelete),
+            Op.drop,
+            ...i64Const(JSValue.TRUE),
+          ];
+        }
+
+        throw new SyntaxError('delete currently supports property targets only');
+      }
+
       const value = compileExpression(node.value, scope, propertyIds, functions);
       if (node.op === '+') return value;
       if (node.op === '!') {
@@ -3532,6 +3647,7 @@ export function compileDynamic(source) {
     functionType([ValType.i64, ValType.i32], [ValType.i64]),
     functionType([ValType.i64, ValType.i64, ValType.i64, ValType.i64], [ValType.i64]),
     functionType([ValType.i64, ValType.i64], [ValType.i64]),
+    functionType([ValType.i64, ValType.i32], [ValType.i64]),
   ];
 
   const sourceTypes = program.functions.map((fn) => (
@@ -3593,6 +3709,7 @@ export function compileDynamic(source) {
     arrayDeleteBody(),
     arrayCopyWithinBody(),
     arrayConcatOneBody(),
+    objectDeleteBody(),
     ...program.functions.map((fn) => (
       compileSourceFunction(fn, propertyIds, functions, stringLayout.pointers)
     )),
